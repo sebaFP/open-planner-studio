@@ -19,6 +19,8 @@ License: LGPL-3.0-or-later, like the repository.
   milestone read from a file keeps its own kind. Outgoing SS/SF relations from a finish milestone do not add a
   day. A milestone with an MFO/FNET/FNLT constraint shows the day the finish falls on. A finished
   predecessor's `finReal` (a date) counts as the end of that working day when it feeds a finish milestone.
+  A finish milestone carries `hitoDeFin: true` in its result, so a Gantt can draw it at the end of its day
+  (where the predecessor's bar ends) instead of at the start.
 - **`restriccion` MSO / MFO** set from the model are hard pins in every profile: the date wins over the logic and
   a relation it breaks stays reported (`restriccionesVioladas`, negative float on the predecessor). A pin pushed
   past its date by the status date is reported too.

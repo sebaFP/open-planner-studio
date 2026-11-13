@@ -159,6 +159,12 @@ export interface ResultadoTarea {
   motivo: MotivoFecha | null;
   /** Rolled-up progress for summaries; the task's own for leaves (0–1). */
   avance: number;
+  /**
+   * Present (true) only on a FINISH milestone: it sits at the END of its day (the instant its
+   * predecessor finishes), so a Gantt draws it where that bar ends, not at the start of the day.
+   * Absent on start milestones and on every non-milestone task.
+   */
+  hitoDeFin?: true;
 }
 
 export interface ResultadoProgramacion {

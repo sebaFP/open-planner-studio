@@ -45,6 +45,13 @@ const fechas = (r: ReturnType<typeof programar>, id: string) => `${por(r, id).in
   eq('A1 sin fecha límite incumplida', r.fechasLimiteIncumplidas, []);
   eq('A1 holgura del hito', por(r, 'M').holguraTotal, 0);
   ok('A1 hito crítico', por(r, 'M').critica);
+  // El Gantt dibuja un hito de fin al final de su día (donde termina la barra de la predecesora).
+  eq('A1 hito de fin marcado', por(r, 'M').hitoDeFin, true);
+  eq('A1 una tarea no lleva la marca', por(r, 'A').hitoDeFin, undefined);
+  const s = programar(M([T('S', 0), T('B', 2)], [R('S', 'B')], { cal: 'c5' }));
+  eq('A1 hito de inicio sin la marca', por(s, 'S').hitoDeFin, undefined);
+  const f = programar(M([T('F', 0, { restriccion: { tipo: 'MFO', fecha: '2026-01-08' } })], [], { cal: 'c5' }));
+  eq('A1 hito con MFO es de fin', por(f, 'F').hitoDeFin, true);
 }
 for (const perfil of ['ops', 'p6', 'msproject'] as const) {
   const r = programar(M([T('A', 5), T('M', 0, { restriccion: { tipo: 'FNLT', fecha: '2026-01-09' } })], [R('A', 'M')], { cal: 'c5', perfil }));

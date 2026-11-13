@@ -524,6 +524,8 @@ export function programar(modelo: Modelo): ResultadoProgramacion {
       caminoHolgura: r.floatPathByTask[t.id] ?? null,
       motivo: motivoDe(r, t.id),
       avance: x.completion ?? 0,
+      // Solo en un hito de fin: el Gantt lo dibuja al final de su día, donde termina la predecesora.
+      ...(hito && comoFin ? { hitoDeFin: true as const } : {}),
     };
   });
   const inicios = tareas.map((t) => t.inicio).filter(Boolean).sort();
