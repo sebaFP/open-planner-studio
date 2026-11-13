@@ -92,6 +92,8 @@ for (const perfil of ['ops', 'p6', 'msproject'] as const) {
       'M 2026-01-08..2026-01-08 TF0 | B 2026-01-09..2026-01-09 TF0'],
     ['U6 7x24 hito FNET 01-08 sin entrante', M([T('M', 0, { restriccion: { tipo: 'FNET', fecha: '2026-01-08' } }), T('B', 1)], [R('M', 'B')]),
       'M 2026-01-08..2026-01-08 TF0 | B 2026-01-09..2026-01-09 TF0'],
+    ['U6b 7x24 hito solo con FNLT al inicio del proyecto (no retrocede antes del inicio)', M([T('M', 0, { restriccion: { tipo: 'FNLT', fecha: '2026-01-08' } }), T('B', 1)], [R('M', 'B')]),
+      'M 2026-01-05..2026-01-05 TF3 | B 2026-01-05..2026-01-05 TF3'],
     ['U7 7x24 hito con FS entrante y MSO 01-08', M([T('A', 1), T('M', 0, { restriccion: { tipo: 'MSO', fecha: '2026-01-08' } })], [R('A', 'M')]),
       'A 2026-01-05..2026-01-05 TF2 | M 2026-01-08..2026-01-08 TF0'],
     ['U8 7x24 hito con FS entrante y SNET 01-08', M([T('A', 1), T('M', 0, { restriccion: { tipo: 'SNET', fecha: '2026-01-08' } })], [R('A', 'M')]),

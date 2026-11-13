@@ -504,8 +504,8 @@ export function programar(modelo: Modelo): ResultadoProgramacion {
     // un día completo de 24 h) se muestra el día que termina, no el siguiente; un hito de inicio, el día
     // de su instante. Sin esto el hito de un calendario 7x24 salía con el inicio después del fin.
     const hito = !!t.isMilestone && !t.isSummary && !(x.scheduleDuration > 0);
-    // Un hito sin clase pero con una restricción de FIN (MFO/FNET/FNLT) también marca el final de un día.
-    const comoFin = t.milestoneKind === 'FINISH' || (!t.milestoneKind && [t.constraint, t.constraint2].some((c) => c && (c.type === 'MFO' || c.type === 'FNET' || c.type === 'FNLT')));
+    // Un hito sin clase pero con una restricción de FIN que lo ubica (MFO/FNET; FNLT solo acota, no ubica) también marca el final de un día.
+    const comoFin = t.milestoneKind === 'FINISH' || (!t.milestoneKind && [t.constraint, t.constraint2].some((c) => c && (c.type === 'MFO' || c.type === 'FNET')));
     const dia = (s: string | null | undefined) => (hito && comoFin ? fechaFin(s) : fecha(s))!;
     const ini = (s: string | null | undefined) => (hito ? dia(s) : fecha(s)!);
     const fn = (s: string | null | undefined, comoInicio: string | null | undefined) => (hito ? dia(comoInicio ?? s) : fechaFin(s)!);
