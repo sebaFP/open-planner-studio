@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  "include": ["headless/pyc-motor", "src/vite-env.d.ts", "src/types/file-system-access.d.ts"]
+}
