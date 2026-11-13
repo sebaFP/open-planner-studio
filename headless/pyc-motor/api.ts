@@ -187,6 +187,16 @@ export interface ResultadoNivelacion {
   finAntes: string;
   finDespues: string;
   desplazamientos: { tareaId: string; inicioAntes: string; inicioDespues: string }[];
+  /** Constraints and deadlines that leveling made a task break although it met them before (its own delay
+   *  or a predecessor's pushed it past the limit). Leveling first tries to delay ANOTHER task instead, and
+   *  never moves a MSO/MFO task; what is listed here had no way out. Empty = nothing new is broken. */
+  avisos: AvisoNivelacion[];
+}
+
+export interface AvisoNivelacion {
+  tareaId: string;
+  /** `restriccion` = SNLT/FNLT/MSO/MFO no longer met; `fechaLimite` = the task's deadline is now missed. */
+  tipo: 'restriccion' | 'fechaLimite';
 }
 
 export interface ProyectoLeido {

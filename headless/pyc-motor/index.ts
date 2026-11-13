@@ -542,7 +542,7 @@ export function nivelar(modelo: Modelo, opciones: { soloHolgura?: boolean; recur
   tr.tasks = cloneTasksForSolve(tr.tasks);
   const r = resolver(tr, false);
   if (r.error) {
-    return { ok: false, error: r.error, retrasos: {}, sinResolver: {}, finAntes: '', finDespues: '', desplazamientos: [] };
+    return { ok: false, error: r.error, retrasos: {}, sinResolver: {}, finAntes: '', finDespues: '', desplazamientos: [], avisos: [] };
   }
   const res = silencioso(() => levelResources(
     tr.tasks, tr.sequences, tr.resources, tr.assignments, tr.calendar, tr.calendars, r,
@@ -561,6 +561,10 @@ export function nivelar(modelo: Modelo, opciones: { soloHolgura?: boolean; recur
       inicioAntes: fecha((s as { oldStart?: string }).oldStart) ?? '',
       inicioDespues: fecha((s as { newStart?: string }).newStart) ?? '',
     })),
+    avisos: [
+      ...(res.introducedViolations?.constraintTaskIds ?? []).map((tareaId) => ({ tareaId, tipo: 'restriccion' as const })),
+      ...(res.introducedViolations?.deadlineTaskIds ?? []).map((tareaId) => ({ tareaId, tipo: 'fechaLimite' as const })),
+    ],
   };
 }
 

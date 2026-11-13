@@ -532,6 +532,14 @@ if [ "$RUN_HOLIDAYS" -eq 1 ]; then
     unset 'BUNDLES[-1]'
   fi
 
+  # Entrada pyc-motor (API JSON en español): hito de fin tras FS, MSO duro, holgura fuera de secuencia y
+  # nivelación que respeta restricciones.
+  PYCMOTOR="$DIR/.pyc-motor.mjs"
+  if bundle_check "$DIR/check-pyc-motor.ts" "$PYCMOTOR"; then
+    node "$PYCMOTOR" || STATUS=1
+    unset 'BUNDLES[-1]'
+  fi
+
   XERMANIFESTLVL="$DIR/.xer-manifest-leveling.mjs"
   if bundle_check "$DIR/check-xer-manifest-leveling.ts" "$XERMANIFESTLVL"; then
     node "$XERMANIFESTLVL" || STATUS=1

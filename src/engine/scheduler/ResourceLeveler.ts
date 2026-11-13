@@ -131,6 +131,11 @@ export interface LevelingOptions {
    *  nooit de vraag. ELAPSEDTIME blijft uitgesloten (geen werkdagbegrip), en MSP's eigen formulering
    *  is "splits in REMAINING work" — een gestarte taak wijkt uitsluitend via uitloop. */
   allowSplits?: boolean;
+  /** INTERN (de omhulling `levelResources` zet dit; een aanroeper geeft het niet mee): taken die vóór
+   *  de andere (met dezelfde priority) geplaatst worden, zodat een ANDERE taak voor de capaciteit wijkt.
+   *  Het zijn de taken die in een eerdere ronde door hun eigen vertraging een SNLT/FNLT/MSO/MFO of een
+   *  deadline gingen schenden. */
+  placeFirstIds?: string[];
 }
 
 /** Reden waarom een taak onopgelost bleef — de nivelleer-dialoog kiest hierop de bijpassende
@@ -194,6 +199,11 @@ export interface LevelingResult {
    *  het verschil). Alleen aanwezig voor taken die daadwerkelijk een leveling-gat kregen. Zonder
    *  `allowSplits` blijft dit altijd `{}`. */
   gaps: Record<string, TaskSplitGap[]>;
+  /** Taken die NA de nivellering een constraint of deadline schenden die ze vóór de nivellering niet
+   *  schonden (de eigen vertraging of die van een voorganger bracht ze voorbij hun grens). De nivelleerder
+   *  probeert eerst een ANDERE taak te laten wijken (zie `levelResources`); wat hier overblijft had geen
+   *  uitweg. Nooit een MSO/MFO-pin: die schuift niet. Afwezig ⇒ niets nieuws geschonden. */
+  introducedViolations?: { constraintTaskIds: string[]; deadlineTaskIds: string[] };
 }
 
 // Harde bovengrens voor de kandidaat-scan wanneer er een poolitem-grootboek MET
@@ -212,7 +222,53 @@ export const LEVELER_TEST_HOOKS = { incremental: true };
  *  synchrone route en de Web Worker van de nivelleer-dialoog (`services/leveling/`). */
 export type LevelingInput = Parameters<typeof levelResources>;
 
+/**
+ * De nivelleerder. Eén plaatsingsronde (`levelPass`) kiest de volgorde op priority, speling en vroege
+ * start; dat laat soms een taak met een SNLT/FNLT of deadline als laatste wachten en voorbij haar grens
+ * glippen terwijl een taak zonder grens even goed had kunnen wijken. Daarom: schendt een taak na de
+ * ronde iets wat ze vooraf niet schond, dan wordt ze in een volgende ronde EERST geplaatst (de rest
+ * wijkt voor haar) en blijft de beste uitkomst staan. Heeft geen enkele ronde een uitweg, dan staat de
+ * schending in `introducedViolations` (nooit stil). Een MSO/MFO-pin schuift in geen enkele ronde.
+ */
 export function levelResources(
+  tasks: Task[],
+  sequences: Sequence[],
+  resources: Resource[],
+  assignments: ResourceAssignment[],
+  projectCalendar: WorkCalendar,
+  resourceCalendars: WorkCalendar[],
+  cpmResult: CPMResult,
+  options: LevelingOptions,
+  cpmOptions: CPMOptions,
+): LevelingResult {
+  const countOf = (r: LevelingResult): number =>
+    (r.introducedViolations?.constraintTaskIds.length ?? 0) + (r.introducedViolations?.deadlineTaskIds.length ?? 0);
+  const run = (first: string[]): LevelingResult => levelPass(
+    tasks, sequences, resources, assignments, projectCalendar, resourceCalendars, cpmResult,
+    first.length > 0 ? { ...options, placeFirstIds: first } : options, cpmOptions,
+  );
+  let best = run(options.placeFirstIds ?? []);
+  const first = new Set(options.placeFirstIds ?? []);
+  // Met een poolitem-grootboek geen extra rondes: `ledger.book` muteert het gedeelde grootboek, dus een
+  // tweede ronde zou boven op de boekingen van de eerste rekenen (en een andere uitkomst geven).
+  const mayRetry = options.poolLedger === undefined;
+  for (let round = 0; mayRetry && round < MAX_VIOLATION_ROUNDS && countOf(best) > 0; round++) {
+    const fresh = [...best.introducedViolations!.constraintTaskIds, ...best.introducedViolations!.deadlineTaskIds]
+      .filter(id => !first.has(id));
+    if (fresh.length === 0) break;                       // stond al vooraan en schendt nog: geen uitweg
+    for (const id of fresh) first.add(id);
+    const next = run([...first]);
+    if (countOf(next) < countOf(best)) best = next;
+    else if (countOf(next) > countOf(best)) break;
+  }
+  return best;
+}
+
+/** Maximaal aantal extra rondes van `levelResources` om een constraint/deadline te ontwijken (elke ronde
+ *  is een volledige nivellering; meer dan één is zelden nodig). */
+const MAX_VIOLATION_ROUNDS = 4;
+
+function levelPass(
   tasks: Task[],
   sequences: Sequence[],
   resources: Resource[],
@@ -453,6 +509,12 @@ export function levelResources(
   const isInProgressTask = (task: Task): boolean => isPinnedInProgress(task.time);
   const isImmovableTask = (task: Task): boolean => hasManualPlacement(task)
     || isCompletedTask(task) || isInProgressTask(task);
+  // Een harde MSO/MFO-pin ("moet beginnen/eindigen op") staat vast op zijn datum: `applyForwardConstraints`
+  // geeft de pin voorrang op de relaties, en een nivelleervertraging zou hem juist van zijn datum halen. Hij
+  // boekt dus als vaste last (de rest wijkt eromheen) en schuift nooit; een botsing met een andere vaste taak
+  // blijft als onopgelost conflict staan. Een zachte MSO/MFO (P6 «Start On») valt hier niet onder.
+  const isHardPin = (task: Task): boolean => task.constraint?.hard === true
+    && (task.constraint.type === 'MSO' || task.constraint.type === 'MFO');
 
   // ── Vraag per kandidaat (spec §3.11, review ronde 2 punt 6) ────────────────────────────────────
   // Voor elke kandidaatstart bepaalt de GEDEELDE plaatsing (`taskLoadPlacement`, dezelfde als het
@@ -567,7 +629,7 @@ export function levelResources(
   for (const t of tasks) {
     if (!hasDemand(t.id)) continue;             // geen vraag op geselecteerde renewables → niet verschuiven
     if (!inScope(t.id) || options.preserveExistingLeveling) { fixedLoadIds.push(t.id); continue; }
-    if (isImmovableTask(t)) { fixedLoadIds.push(t.id); continue; } // voltooid/in uitvoering — vóór de pin-check
+    if (isImmovableTask(t) || isHardPin(t)) { fixedLoadIds.push(t.id); continue; } // voltooid/in uitvoering/harde pin — vóór de pin-check
     if (t.priority === 1000) pinnedIds.push(t.id); // vastgepind
     else movableIds.push(t.id);
   }
@@ -648,12 +710,15 @@ export function levelResources(
   const totalWork = tasks.reduce((sum, t) => sum + (t.isMilestone ? 0 : Math.max(0, t.time.scheduleDuration)), 0);
   const scanLimit = Math.max(totalWork + 10, 30);
 
-  // Sorteervolgorde: priority desc, totalFloat asc, earlyStart asc, aanmaakvolgorde asc — alle
+  // Sorteervolgorde: priority desc, (ronde 2+: de taken uit `placeFirstIds`), totalFloat asc, earlyStart asc, aanmaakvolgorde asc — alle
   // sleutels uit de VERSE baseline. De laatste sleutel is bewust de stabiele aanmaakvolgorde
   // i.p.v. de random-bevattende task-ID (utils/id.ts), zodat de volgorde deterministisch is.
+  const placeFirst = new Set(options.placeFirstIds ?? []);
   const cmp = (a: string, b: string): number => {
     const ta = taskById.get(a)!, tb = taskById.get(b)!;
     if (tb.priority !== ta.priority) return tb.priority - ta.priority; // hoger eerst
+    const pa = placeFirst.has(a), pb = placeFirst.has(b);
+    if (pa !== pb) return pa ? -1 : 1;                                 // vooraan geplaatst: een andere taak wijkt
     const fa = baseFloat(a), fb = baseFloat(b);
     if (fa !== fb) return fa - fb;
     const ea = baseEs(a), eb = baseEs(b);
@@ -917,7 +982,7 @@ export function levelResources(
     const days = new Set(fixedPoolConflicts.get(taskId) ?? []);
     // De bestaande projectrapportage blijft voor pins en handmatige/volledig vaste plaatsing.
     // Bij overige voortgangslast voegen we uitsluitend de ontbrekende poolconflicten toe.
-    if (pinnedSet.has(taskId) || hasManualPlacement(task) || options.preserveExistingLeveling) {
+    if (pinnedSet.has(taskId) || hasManualPlacement(task) || isHardPin(task) || options.preserveExistingLeveling) {
       for (const [resId, demand] of byRes) {
         for (let i = 0; i < demand.length && i < occ.length; i++) {
           if (demand[i] > 0 && exceedsCapacity(bookedOn(resId, occ[i]), capacityOf(resId, occ[i]))) {
@@ -958,6 +1023,13 @@ export function levelResources(
     shifts[t.id] = { oldStart: cur, newStart: tr, delta };
   }
 
+  // Wat de nivellering NIEUW schendt: constraint of deadline die de baseline (zonder vertragingen) nog
+  // haalde en de proef-solve niet meer. Alleen taken uit dit universum; een pin kan hier niet in staan.
+  const introducedViolations = trial.error ? null : {
+    constraintTaskIds: trial.violatedConstraintTaskIds.filter(id => leafSet.has(id) && !baseline.violatedConstraintTaskIds.includes(id)),
+    deadlineTaskIds: trial.missedDeadlineTaskIds.filter(id => leafSet.has(id) && !baseline.missedDeadlineTaskIds.includes(id)),
+  };
+
   return {
     delays,
     delayMinutes,
@@ -968,6 +1040,8 @@ export function levelResources(
     projectEndBefore: cpmResult.projectEnd,
     projectEndAfter,
     gaps: gapsOut,
+    ...(introducedViolations && (introducedViolations.constraintTaskIds.length > 0 || introducedViolations.deadlineTaskIds.length > 0)
+      ? { introducedViolations } : {}),
   };
 
   // --- lokale helpers (sluiten over booked/demandAt/capacityOf) ---
