@@ -74,6 +74,13 @@ export interface MTarea {
   retrasoNivelacionDias?: number | null;
   /** External identifier from the imported file (P6 activity id / MSP UID), kept for round trips. */
   idExterno?: string | null;
+  /**
+   * What-if multiplier on the task's REMAINING work (1 = unchanged, 1.25 = remaining lasts 25 % longer).
+   * Applied on top of the remaining duration the task really has — for an imported task, the file's own
+   * remaining (P6 remaining duration, MSP remaining work) — so done work, hours and progress survive.
+   * Finished tasks are not touched; the remaining is capped at MAX_REMAINING_DAYS working days.
+   */
+  factorRestante?: number | null;
   notas?: string | null;
   /** Fidelity: the element exactly as read from the file (JSON, opaque). The motor starts from it and
    *  overrides only what the model changed, so P6/MSP data (hours, remaining work, types) survive. */

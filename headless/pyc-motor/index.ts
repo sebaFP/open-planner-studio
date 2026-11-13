@@ -105,6 +105,34 @@ function leer<T>(json: string | null | undefined): T | null {
   }
 }
 
+/** Cap on the remaining work after a what-if multiplier (≈ 10 years of working days). */
+export const MAX_REMAINING_DAYS = 3660;
+
+/**
+ * Stretches (or shortens) the remaining work of a task by `factor`, starting from the remaining the task
+ * really carries: `remainingMinutes` (hour tasks), `remainingTime` (day tasks), or, when the source has
+ * none, duration × (1 − completion). The done part and the total move by the same delta.
+ */
+function applyRemainingFactor(time: Task['time'], factor: number | null | undefined, hoursPerDay: number): void {
+  if (factor == null || !Number.isFinite(factor) || factor <= 0 || factor === 1) return;
+  const completion = Math.min(1, Math.max(0, time.completion ?? 0));
+  if (completion >= 1 || time.actualFinish) return;
+  const minutesPerDay = hoursPerDay * 60;
+  const totalDays =
+    time.durationUnit === 'hours' && time.durationMinutes != null ? time.durationMinutes / minutesPerDay : time.scheduleDuration || 0;
+  const oldRemaining =
+    time.remainingMinutes != null ? time.remainingMinutes / minutesPerDay
+      : time.remainingTime != null ? time.remainingTime
+        : totalDays * (1 - completion);
+  if (!(oldRemaining > 0)) return;
+  const newRemaining = Math.min(MAX_REMAINING_DAYS, oldRemaining * factor);
+  const delta = newRemaining - oldRemaining;
+  if (time.remainingMinutes != null) time.remainingMinutes = Math.round(newRemaining * minutesPerDay);
+  time.remainingTime = Math.round(newRemaining * 1000) / 1000;
+  time.scheduleDuration = Math.round(((time.scheduleDuration || 0) + delta) * 1000) / 1000;
+  if (time.durationMinutes != null) time.durationMinutes = Math.round(time.durationMinutes + delta * minutesPerDay);
+}
+
 /** Working days of an OPS task as the model counts them (hours → days on its calendar). */
 function diasDeTask(t: Task, horasDia: number): number {
   const x = t.time;
@@ -266,7 +294,10 @@ function traducir(m: Modelo): Traducido {
 function aTaskFiel(t: MTarea, parentId: string | null, childIds: string[], resourceIds: string[], horas: number): Task {
   const nuestra = aTask(t, parentId, childIds, resourceIds);
   const o = leer<Task>(t.original);
-  if (!o) return nuestra;
+  if (!o) {
+    if (!childIds.length) applyRemainingFactor(nuestra.time, t.factorRestante, horas);
+    return nuestra;
+  }
   const x = o.time;
   const mismaDur = mismoNumero(diasDeTask(o, horas), nuestra.time.scheduleDuration);
   const mismoAvance =
@@ -296,6 +327,7 @@ function aTaskFiel(t: MTarea, parentId: string | null, childIds: string[], resou
     (o.constraint?.type ?? 'ASAP') === (nuestra.constraint?.type ?? 'ASAP') &&
     fecha(o.constraint?.date) === fecha(nuestra.constraint?.date);
   const mismoRetraso = mismoNumero(o.levelingDelay, nuestra.levelingDelay);
+  if (!childIds.length && !nuestra.isMilestone) applyRemainingFactor(time, t.factorRestante, horas);
   const salida: Task = {
     ...o,
     id: nuestra.id,
