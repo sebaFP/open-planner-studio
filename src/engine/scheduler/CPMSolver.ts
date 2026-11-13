@@ -947,7 +947,11 @@ export class CPMSolver {
     if (!task.time.actualFinish || task.time.completion < 1) return seq;
     const lagMinutes = this.resolveLagMinutes(seq, task, lagEng);
     if (!(lagMinutes > 0)) return seq;
-    const actualFinish = parseInstant(task.time.actualFinish);
+    // De lag loopt vanaf het feit waaraan de relatie hangt: SS/SF vanaf de WERKELIJKE START van de voorganger,
+    // FS/FF vanaf zijn werkelijk einde. Een SS-lag van 30 dagen vanaf een start van tien weken geleden is al
+    // verstreken; meten vanaf het werkelijk einde liet er 21 dagen van over en schoof de opvolger weken op.
+    const fromStart = (seq.type === 'START_START' || seq.type === 'START_FINISH') && !!task.time.actualStart;
+    const actualFinish = parseInstant(fromStart ? task.time.actualStart! : task.time.actualFinish);
     if (Number.isNaN(actualFinish.getTime()) || actualFinish >= this.dataDate) return seq;
     const elapsed = lagEng.workMinutesBetween(actualFinish, this.dataDate);
     const remaining = Math.max(0, lagMinutes - elapsed);
@@ -2044,7 +2048,11 @@ export class CPMSolver {
       const anchor = isZeroDurationMilestone(t) && !eng.hasOwnWorkBlocks && taskDurationUnit(t) !== 'hours'
         ? this.dayFirstBandStart(eng, parseInstant(t.time.scheduleStart))?.toISOString().slice(0, 16) ?? t.time.scheduleStart
         : t.time.scheduleStart;
-      const s = this.rootFloor(eng, anchor, isElapsedTask(t));
+      // Een wortel-taak met een werkelijke start vóór haar `scheduleStart` draagt die start bij: bij een
+      // gestarte of voltooide taak is die laatste het oude (verouderde) doelvenster van het bestand. Zo'n
+      // vloer (bv. 2 nov voor een taak die op 1 aug begon) trok anders elke opvolger met voorganger daarheen.
+      const startForFloor = t.time.actualStart && parseInstant(t.time.actualStart) < parseInstant(anchor) ? t.time.actualStart : anchor;
+      const s = this.rootFloor(eng, startForFloor, isElapsedTask(t));
       if (!projectStart || s < projectStart) projectStart = s;
     }
     return projectStart;

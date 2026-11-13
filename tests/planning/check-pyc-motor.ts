@@ -201,6 +201,45 @@ for (const perfil of ['ops', 'p6', 'msproject'] as const) {
   eq('H3 fecha editada: pin duro', fechas(editada, 'B'), '2026-01-07..2026-01-08');
 }
 
+{
+  // Programa real de P6 (XER, fecha de estado 2026-11-01, calendario de 7 días 05:00-19:00, perfil p6). Dos pares
+  // con su `original`, tal como los entrega la aplicación:
+  //  - A1520 (terminada, CP_Phys, inicio real 08-01, fin real 10-22 a las 00:00, doc. de destino viejo en 11-02)
+  //    con SS+30 d hacia A1530 (en curso, inicio real 10-12, restante 168 h): el ancla del SS sale del inicio
+  //    real, no del destino viejo ni del fin real; P6 deja el restante de A1530 del 11-01 al 11-12.
+  //  - A1010 (terminada con fin real 11-01 19:00, después de la fecha de estado) con FS hacia A1040: P6 programa
+  //    A1040 el 11-01 (no 11-02).
+  // Un fin real a las 00:00 se muestra con su fecha (el 22, no el 21).
+  const cal14 = {
+    id: 'c14', nombre: '7x14', diasLaborales: [1, 2, 3, 4, 5, 6, 7], horasDia: 14, horaInicio: 5, feriados: [],
+    original: JSON.stringify({ id: 'c14', name: '7x14', description: '', workDays: [1, 2, 3, 4, 5, 6, 7], workStartHour: 5, workEndHour: 19, hoursPerDay: 14, holidays: [], workTime: { byWeekday: Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map(d => [String(d), [{ start: 300, end: 1140 }]])) }, hourModeSource: 'XER_CLOCK' }),
+  };
+  const proyecto = JSON.stringify({
+    id: '5298', name: 'real', description: '', startDate: '2026-07-13T05:00', endDate: '', calendarId: 'c14',
+    createdAt: '2026-07-13T05:00', modifiedAt: '2026-11-01T00:00', author: '', company: '', statusDate: '2026-11-01T00:00',
+    progressMode: 'RETAINED_LOGIC',
+    schedulingOptions: { lagCalendar: 'predecessor', criticalDefinition: { mode: 'totalFloat', thresholdHours: 0 }, totalFloatMode: 'finish', useExpectedFinishDates: true, p6CompletedLateFromRemainingWindow: true, startToStartLagFrom: 'earlyStart', useProjectEndDateForFloat: true },
+    schedulingProfile: { baseId: 'p6', id: 'p6', name: '', overrides: {} },
+  });
+  const mReal = (tareas: MTarea[], relaciones: MRelacion[]): Modelo => ({
+    proyecto: { original: proyecto, nombre: 'real', inicio: '2026-07-13', fechaEstado: '2026-11-01', perfil: 'p6', calendarioId: 'c14', umbralCasiCritica: null },
+    calendarios: [cal14], tareas, relaciones, recursos: [], asignaciones: [],
+  } as Modelo);
+  const rel = (id: string, p: string, s: string, tipo: MRelacion['tipo'], lag: number, original: object): MRelacion =>
+    ({ id, predecesoraId: p, sucesoraId: s, tipo, desfaseDias: lag, original: JSON.stringify(original) }) as MRelacion;
+  const A1520 = T('A1520', 45, { id: 'A1520', idExterno: 'A1520', avance: 1, inicio: '2026-08-01', inicioReal: '2026-08-01', finReal: '2026-10-22', original: JSON.stringify({"id":"115836","name":"OP-55 / OP-57","wbsCode":"A1520","taskType":"CONSTRUCTION","status":"COMPLETED","isMilestone":false,"priority":500,"parentId":null,"childIds":[],"time":{"durationType":"WORKTIME","durationUnit":"hours","scheduleDuration":45,"durationMinutes":37800,"scheduleStart":"2026-11-02T05:00","scheduleFinish":"2026-12-16T19:00","earlyStart":"2026-11-02T05:00","earlyFinish":"2026-12-16T19:00","lateStart":"2026-11-02T05:00","lateFinish":"2026-12-16T19:00","freeFloat":0,"totalFloat":0,"isCritical":false,"completion":1,"remainingMinutes":0,"actualStart":"2026-08-01T00:00","actualFinish":"2026-10-22T00:00"},"p6DurationType":"DT_FixedDUR2","p6ActivityType":"TT_Task","p6ProjectId":"5298","p6TaskId":"115836","p6ExplicitTargetWindow":true,"p6CompletePctType":"CP_Phys","workRule":"FIXED_DURATION_WORK","resourceIds":[]}) });
+  const A1530 = T('A1530', 15, { id: 'A1530', idExterno: 'A1530', avance: 0.07139999999999999, inicio: '2026-10-12', inicioReal: '2026-10-12', original: JSON.stringify({"id":"115840","name":"OP-49 / CNX 13/61","wbsCode":"A1530","taskType":"CONSTRUCTION","status":"STARTED","isMilestone":false,"priority":500,"parentId":null,"childIds":[],"time":{"durationType":"WORKTIME","durationUnit":"hours","scheduleDuration":15,"durationMinutes":12600,"scheduleStart":"2026-10-25T05:00","scheduleFinish":"2026-11-08T19:00","earlyStart":"2026-10-25T05:00","earlyFinish":"2026-11-08T19:00","lateStart":"2026-10-25T05:00","lateFinish":"2026-11-08T19:00","freeFloat":0,"totalFloat":0,"isCritical":false,"completion":0.07139999999999999,"remainingMinutes":10080,"actualStart":"2026-10-12T00:00"},"p6DurationType":"DT_FixedDUR2","p6ActivityType":"TT_Task","p6ProjectId":"5298","p6TaskId":"115840","p6ExplicitTargetWindow":true,"p6CompletePctType":"CP_Phys","workRule":"FIXED_DURATION_WORK","resourceIds":[]}) });
+  const r1 = programar(mReal([A1520, A1530], [rel('59158', 'A1520', 'A1530', 'SS', 30, { id: '59158', predecessorId: '115836', successorId: '115840', type: 'START_START', lagMinutes: 25200, lagDays: 30 })]));
+  eq('R1 A1530: restante del 11-01 al 11-12 (no ancla en el destino viejo de A1520)', [fechas(r1, 'A1530'), por(r1, 'A1530').inicioTemprano], ['2026-10-12..2026-11-12', '2026-11-01']);
+  eq('R1 A1520 terminada: fin real a las 00:00 se muestra el 22', fechas(r1, 'A1520'), '2026-08-01..2026-10-22');
+  const A1010 = T('A1010', 15, { id: 'A1010', idExterno: 'A1010', avance: 1, inicio: '2026-10-14', inicioReal: '2026-10-14', finReal: '2026-11-01', original: JSON.stringify({"id":"115786","name":"Fr. Gabinete C-55","wbsCode":"A1010","taskType":"CONSTRUCTION","status":"COMPLETED","isMilestone":false,"priority":500,"parentId":null,"childIds":[],"time":{"durationType":"WORKTIME","durationUnit":"hours","scheduleDuration":15,"durationMinutes":12600,"scheduleStart":"2026-10-20T05:00","scheduleFinish":"2026-11-03T19:00","earlyStart":"2026-10-20T05:00","earlyFinish":"2026-11-03T19:00","lateStart":"2026-10-20T05:00","lateFinish":"2026-11-03T19:00","freeFloat":0,"totalFloat":0,"isCritical":false,"completion":1,"remainingMinutes":0,"actualStart":"2026-10-14T00:00","actualFinish":"2026-11-01T19:00"},"p6DurationType":"DT_FixedDUR2","p6ActivityType":"TT_Task","p6ProjectId":"5298","p6TaskId":"115786","p6ExplicitTargetWindow":true,"p6CompletePctType":"CP_Phys","workRule":"FIXED_DURATION_WORK","resourceIds":[]}) });
+  const A1040 = T('A1040', 15, { id: 'A1040', idExterno: 'A1040', avance: 0, inicio: '2026-11-01', original: JSON.stringify({"id":"115789","name":"Fr. Gabinete C-55","wbsCode":"A1040","taskType":"CONSTRUCTION","status":"NOT_STARTED","isMilestone":false,"priority":500,"parentId":null,"childIds":[],"time":{"durationType":"WORKTIME","durationUnit":"hours","scheduleDuration":15,"durationMinutes":12600,"scheduleStart":"2026-11-01T05:00","scheduleFinish":"2026-11-15T19:00","earlyStart":"2026-11-01T05:00","earlyFinish":"2026-11-15T19:00","lateStart":"2026-11-01T05:00","lateFinish":"2026-11-15T19:00","freeFloat":0,"totalFloat":0,"isCritical":false,"completion":0,"remainingMinutes":12600},"p6DurationType":"DT_FixedDUR2","p6ActivityType":"TT_Task","p6ProjectId":"5298","p6TaskId":"115789","p6ExplicitTargetWindow":true,"p6CompletePctType":"CP_Phys","workRule":"FIXED_DURATION_WORK","resourceIds":[]}) });
+  const r2 = programar(mReal([A1010, A1040], [rel('59092', 'A1010', 'A1040', 'FS', 0, { id: '59092', predecessorId: '115786', successorId: '115789', type: 'FINISH_START', lagMinutes: 0, lagDays: 0 })]));
+  eq('R2 perfil p6: sucesora de una terminada con fin real posterior a la fecha de estado', [fechas(r2, 'A1010'), fechas(r2, 'A1040')], ['2026-10-14..2026-11-01', '2026-11-01..2026-11-15']);
+  const r3 = programar({ ...mReal([A1010, A1040], [rel('59092', 'A1010', 'A1040', 'FS', 0, { id: '59092', predecessorId: '115786', successorId: '115789', type: 'FINISH_START', lagMinutes: 0, lagDays: 0 })]), proyecto: { original: proyecto, nombre: 'real', inicio: '2026-07-13', fechaEstado: '2026-11-01', perfil: 'ops', calendarioId: 'c14', umbralCasiCritica: null } } as Modelo);
+  eq('R3 fuera del perfil p6 la regla no se aplica', fechas(r3, 'A1040'), '2026-11-02..2026-11-16');
+}
+
 // ── E. La nivelación respeta restricciones ────────────────────────────────────────────────────
 const res = [{ id: 'R', nombre: 'R', tipo: 'equipo', capacidadDia: 1 }] as Modelo['recursos'];
 const asg = (...ids: string[]) => ids.map(i => ({ id: `a${i}`, tareaId: i, recursoId: 'R', unidadesDia: 1 })) as Modelo['asignaciones'];

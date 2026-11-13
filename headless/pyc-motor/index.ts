@@ -167,7 +167,22 @@ function calendarioPorDefecto(): MCalendario {
   return { id: 'cal-pyc', nombre: '7x24', diasLaborales: [1, 2, 3, 4, 5, 6, 7], horasDia: 24, feriados: [] };
 }
 
+/** En el perfil p6, una predecesora terminada con fin real posterior a la fecha de estado no empuja a su
+ *  sucesora más allá de ella (P6 programa la sucesora en la fecha de estado): es la convención C1
+ *  `p6CompletedPredecessorAtDataDate`, apagada en el perfil p6 del registro porque ningún archivo medido la
+ *  ejercita. Aquí se activa como diferencia del perfil (el registro y los demás usuarios del motor no cambian),
+ *  salvo que el perfil ya la fije. */
+function conReglasDeP6(p: Project): Project {
+  const perfil = p.schedulingProfile;
+  if (!perfil || perfil.baseId !== 'p6' || perfil.overrides?.p6CompletedPredecessorAtDataDate !== undefined) return p;
+  return { ...p, schedulingProfile: { ...perfil, overrides: { ...perfil.overrides, p6CompletedPredecessorAtDataDate: true } } };
+}
+
 function aProyecto(m: Modelo): Project {
+  return conReglasDeP6(aProyectoSinReglas(m));
+}
+
+function aProyectoSinReglas(m: Modelo): Project {
   const nuestro = aProyectoBase(m);
   const o = leer<Project>(m.proyecto.original);
   if (!o) return nuestro;
@@ -497,6 +512,7 @@ export function programar(modelo: Modelo): ResultadoProgramacion {
     return vacio(e instanceof Error ? e.message : String(e), []);
   }
   if (r.error) return vacio(r.error, r.cycleTaskIds ?? []);
+  const reales = new Map(modelo.tareas.map((t) => [t.id, { inicioReal: fecha(t.inicioReal), finReal: fecha(t.finReal) }]));
   const tareas: ResultadoTarea[] = tr.tasks.map((t) => {
     const c = r.tasks.get(t.id);
     const x = t.time;
@@ -509,10 +525,13 @@ export function programar(modelo: Modelo): ResultadoProgramacion {
     const dia = (s: string | null | undefined) => (hito && comoFin ? fechaFin(s) : fecha(s))!;
     const ini = (s: string | null | undefined) => (hito ? dia(s) : fecha(s)!);
     const fn = (s: string | null | undefined, comoInicio: string | null | undefined) => (hito ? dia(comoInicio ?? s) : fechaFin(s)!);
+    // Lo real se muestra con la fecha del hecho: un fin real a las 00:00 (P6 guarda «2026-09-20 00:00» y muestra
+    // «20-Sep-26») es el 20, no el fin del día anterior; coincide con `finReal` del modelo y con la barra.
+    const real = reales.get(t.id);
     return {
       id: t.id,
-      inicio: ini(x.actualStart ?? x.earlyStart ?? x.scheduleStart),
-      fin: fn(x.actualFinish ?? x.earlyFinish ?? x.scheduleFinish, x.actualStart ?? x.earlyStart ?? x.scheduleStart),
+      inicio: real?.inicioReal ?? ini(x.actualStart ?? x.earlyStart ?? x.scheduleStart),
+      fin: real?.finReal ?? fn(x.actualFinish ?? x.earlyFinish ?? x.scheduleFinish, x.actualStart ?? x.earlyStart ?? x.scheduleStart),
       inicioTemprano: ini(c?.earlyStart ?? x.earlyStart),
       finTemprano: fn(c?.earlyFinish ?? x.earlyFinish, c?.earlyStart ?? x.earlyStart),
       inicioTardio: ini(c?.lateStart ?? x.lateStart),

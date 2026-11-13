@@ -43,3 +43,19 @@ License: LGPL-3.0-or-later, like the repository.
   leveling (and stays broken) is not listed; read it from `programar` (`restriccionesVioladas`,
   `fechasLimiteIncumplidas`). Empty means leveling broke nothing new. Leveling still moves tasks in whole
   working days.
+
+## Real dates and finished predecessors (p6 programs read from a file)
+
+- **Real dates are shown as the fact says**: a task with `inicioReal` / `finReal` returns exactly those dates as
+  `inicio` / `fin` (P6 stores `act_end 2026-09-20 00:00` and shows 20-Sep-26; the engine used to read the 00:00 as
+  the end of the 19th). The bar, the Fin column and `finReal` always agree.
+- **A relation out of a task with real dates anchors on the real dates**, never on the file's old
+  early/schedule dates: SS/SF measure the lag from the predecessor's real start, FS/FF from its real finish (the
+  remaining lag after a finished predecessor is `lag - worked time since that anchor up to the status date`), and a
+  root task with a real start before its old `scheduleStart` contributes that real start to the project-start
+  floor (a stale 02-Nov window used to floor every successor of a task that began on 01-Aug).
+- **Profile p6 only**: a finished predecessor whose real finish is after the status date does not push its
+  successor beyond the status date (P6 schedules it on the status date). It is convention C1
+  `p6CompletedPredecessorAtDataDate`, off in the registry's built-in p6 profile; this entry point switches it on as
+  an override of the p6 profile (the registry and the other profiles are untouched) unless the profile already
+  sets it. Other profiles keep pushing the successor past the finish.
