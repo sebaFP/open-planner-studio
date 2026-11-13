@@ -94,11 +94,70 @@ function aCalendario(c: MCalendario): WorkCalendar {
   } as WorkCalendar;
 }
 
+// ── Fidelity: start from the element as read from the file and override only what changed ──
+
+function leer<T>(json: string | null | undefined): T | null {
+  if (!json) return null;
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** Working days of an OPS task as the model counts them (hours → days on its calendar). */
+function diasDeTask(t: Task, horasDia: number): number {
+  const x = t.time;
+  const d = x.durationUnit === 'hours' && x.durationMinutes != null ? x.durationMinutes / 60 / horasDia : x.scheduleDuration;
+  return Math.round((d || 0) * 1000) / 1000;
+}
+
+function lagDeSeq(s: Sequence, horasDia: number): number {
+  const d = s.lagMinutes != null ? s.lagMinutes / 60 / horasDia : s.lagDays;
+  return Math.round((d || 0) * 1000) / 1000;
+}
+
+const mismoNumero = (a: number | null | undefined, b: number | null | undefined) => Math.abs((a ?? 0) - (b ?? 0)) < 1e-6;
+const listaFechas = (l: { desde: string; hasta: string }[] | undefined) =>
+  (l ?? []).map((f) => `${f.desde}|${f.hasta}`).sort().join(',');
+
+function aCalendarioFiel(c: MCalendario): WorkCalendar {
+  const nuestro = aCalendario(c);
+  const o = leer<WorkCalendar>(c.original);
+  if (!o) return nuestro;
+  const visto = desdeCalendario(o);
+  const igual =
+    [...visto.diasLaborales].sort().join() === [...c.diasLaborales].sort().join() &&
+    mismoNumero(visto.horasDia, c.horasDia) &&
+    listaFechas(visto.feriados) === listaFechas(c.feriados) &&
+    listaFechas(visto.diasExtra) === listaFechas(c.diasExtra);
+  return igual ? { ...o, id: c.id, name: c.nombre } : nuestro;
+}
+
 function calendarioPorDefecto(): MCalendario {
   return { id: 'cal-pyc', nombre: '7x24', diasLaborales: [1, 2, 3, 4, 5, 6, 7], horasDia: 24, feriados: [] };
 }
 
 function aProyecto(m: Modelo): Project {
+  const nuestro = aProyectoBase(m);
+  const o = leer<Project>(m.proyecto.original);
+  if (!o) return nuestro;
+  // Las opciones del archivo (P6/MSP) se conservan; lo que la carta fija (inicio,
+  // fecha de estado, calendario, perfil si se cambió) manda.
+  const mismoPerfil = (o.schedulingProfile?.baseId ?? m.proyecto.perfil) === m.proyecto.perfil;
+  return {
+    ...o,
+    id: nuestro.id,
+    name: nuestro.name,
+    startDate: nuestro.startDate,
+    calendarId: nuestro.calendarId,
+    statusDate: nuestro.statusDate,
+    schedulingProfile: mismoPerfil && o.schedulingProfile ? o.schedulingProfile : nuestro.schedulingProfile,
+    schedulingOptions: { ...(o.schedulingOptions ?? {}), ...(nuestro.schedulingOptions ?? {}) },
+  } as Project;
+}
+
+function aProyectoBase(m: Modelo): Project {
   const p = m.proyecto;
   const opciones: Record<string, unknown> = {};
   if (p.umbralCasiCritica != null) opciones.nearCriticalThreshold = p.umbralCasiCritica;
@@ -133,7 +192,8 @@ interface Traducido {
 
 function traducir(m: Modelo): Traducido {
   const calendariosM = m.calendarios.length ? m.calendarios : [calendarioPorDefecto()];
-  const calendars = calendariosM.map(aCalendario);
+  const calendars = calendariosM.map(aCalendarioFiel);
+  const horasDe = new Map(calendars.map((c) => [c.id, c.hoursPerDay || 8]));
   const calendar = calendars.find((c) => c.id === m.proyecto.calendarioId) ?? calendars[0];
   const ids = new Set(m.tareas.map((t) => t.id));
   const hijos = new Map<string, MTarea[]>();
@@ -156,30 +216,110 @@ function traducir(m: Modelo): Traducido {
   const visitar = (padre: string, prefijo: string) => {
     (hijos.get(padre) ?? []).forEach((t, i) => {
       const numero = prefijo ? `${prefijo}.${i + 1}` : String(i + 1);
-      tasks.push(aTask({ ...t, wbs: t.wbs || numero }, padre || null, (hijos.get(t.id) ?? []).map((h) => h.id), recursosDe.get(t.id) ?? []));
+      const horas = horasDe.get(t.calendarioId ?? '') ?? calendar.hoursPerDay ?? 8;
+      tasks.push(aTaskFiel({ ...t, wbs: t.wbs || numero }, padre || null, (hijos.get(t.id) ?? []).map((h) => h.id), recursosDe.get(t.id) ?? [], horas));
       visitar(t.id, numero);
     });
   };
   visitar('', '');
   const sequences: Sequence[] = m.relaciones
     .filter((r) => ids.has(r.predecesoraId) && ids.has(r.sucesoraId) && r.predecesoraId !== r.sucesoraId)
-    .map((r) => ({
-      id: r.id, predecessorId: r.predecesoraId, successorId: r.sucesoraId,
-      type: TIPO_A_SEQ[r.tipo] ?? 'FINISH_START', lagDays: r.desfaseDias || 0,
-    }));
-  const resources: Resource[] = m.recursos.map((r) => ({
-    id: r.id, name: r.nombre, type: RECURSO_A_OPS[r.tipo] ?? 'EQUIPMENT', description: '',
-    maxUnits: r.capacidadDia, ...(r.calendarioId ? { calendarId: r.calendarioId } : {}),
-    ...(r.unidad ? { unitOfMeasure: r.unidad } : {}),
-  }));
+    .map((r) => {
+      const nuestra: Sequence = {
+        id: r.id, predecessorId: r.predecesoraId, successorId: r.sucesoraId,
+        type: TIPO_A_SEQ[r.tipo] ?? 'FINISH_START', lagDays: r.desfaseDias || 0,
+      };
+      const o = leer<Sequence>(r.original);
+      if (!o || o.type !== nuestra.type || !mismoNumero(lagDeSeq(o, calendar.hoursPerDay || 8), r.desfaseDias)) return nuestra;
+      return { ...o, id: r.id, predecessorId: r.predecesoraId, successorId: r.sucesoraId };
+    });
+  const resources: Resource[] = m.recursos.map((r) => {
+    const nuestro: Resource = {
+      id: r.id, name: r.nombre, type: RECURSO_A_OPS[r.tipo] ?? 'EQUIPMENT', description: '',
+      maxUnits: r.capacidadDia, ...(r.calendarioId ? { calendarId: r.calendarioId } : {}),
+      ...(r.unidad ? { unitOfMeasure: r.unidad } : {}),
+    };
+    const o = leer<Resource>(r.original);
+    if (!o) return nuestro;
+    return { ...o, id: r.id, name: r.nombre, ...(mismoNumero(o.maxUnits, r.capacidadDia) ? {} : { maxUnits: r.capacidadDia, availabilitySteps: undefined }), calendarId: r.calendarioId ?? undefined };
+  });
   const assignments: ResourceAssignment[] = m.asignaciones
     .filter((a) => ids.has(a.tareaId))
-    .map((a) => ({ id: a.id, taskId: a.tareaId, resourceId: a.recursoId, unitsPerDay: a.unidadesDia }) as ResourceAssignment);
+    .map((a) => {
+      const nuestra = { id: a.id, taskId: a.tareaId, resourceId: a.recursoId, unitsPerDay: a.unidadesDia } as ResourceAssignment;
+      const o = leer<ResourceAssignment>(a.original);
+      if (!o || !mismoNumero(o.unitsPerDay, a.unidadesDia)) return nuestra;
+      return { ...o, id: a.id, taskId: a.tareaId, resourceId: a.recursoId };
+    });
   const baselines: Baseline[] = (m.lineasBase ?? []).map((b) => ({
     id: b.id, name: b.nombre, createdAt: b.creadaEn, projectEnd: '', projectDuration: 0,
     tasks: b.tareas.map((t) => ({ taskId: t.tareaId, start: t.inicio, finish: t.fin, duration: t.duracionDias, isMilestone: false })),
   }));
   return { project: aProyecto(m), calendar, calendars, tasks, sequences, resources, assignments, baselines };
+}
+
+/**
+ * La tarea del archivo, con lo que cambió en la carta encima. Si la duración, el
+ * avance o el inicio no cambiaron, quedan los del archivo (horas, restante de P6,
+ * tipo de duración…): así una carta importada calcula igual que en P6 / Project.
+ */
+function aTaskFiel(t: MTarea, parentId: string | null, childIds: string[], resourceIds: string[], horas: number): Task {
+  const nuestra = aTask(t, parentId, childIds, resourceIds);
+  const o = leer<Task>(t.original);
+  if (!o) return nuestra;
+  const x = o.time;
+  const mismaDur = mismoNumero(diasDeTask(o, horas), nuestra.time.scheduleDuration);
+  const mismoAvance =
+    mismoNumero(x.completion, nuestra.time.completion) &&
+    fecha(x.actualStart) === nuestra.time.actualStart &&
+    fecha(x.actualFinish) === nuestra.time.actualFinish;
+  const mismoInicio = fecha(x.actualStart ?? x.scheduleStart ?? x.earlyStart) === nuestra.time.scheduleStart;
+  const time = { ...x };
+  if (!mismaDur) {
+    Object.assign(time, { durationUnit: 'days', scheduleDuration: nuestra.time.scheduleDuration });
+    delete time.durationMinutes;
+    delete time.remainingMinutes;
+    delete time.remainingTime;
+  }
+  if (!mismoAvance) {
+    time.completion = nuestra.time.completion;
+    time.actualStart = nuestra.time.actualStart;
+    time.actualFinish = nuestra.time.actualFinish;
+    delete time.remainingMinutes;
+    delete time.remainingTime;
+  }
+  if (!mismoInicio) {
+    time.scheduleStart = nuestra.time.scheduleStart;
+    time.scheduleFinish = nuestra.time.scheduleStart;
+  }
+  const mismaRestriccion =
+    (o.constraint?.type ?? 'ASAP') === (nuestra.constraint?.type ?? 'ASAP') &&
+    fecha(o.constraint?.date) === fecha(nuestra.constraint?.date);
+  const mismoRetraso = mismoNumero(o.levelingDelay, nuestra.levelingDelay);
+  const salida: Task = {
+    ...o,
+    id: nuestra.id,
+    name: nuestra.name,
+    description: nuestra.description,
+    wbsCode: nuestra.wbsCode,
+    parentId: nuestra.parentId,
+    childIds: nuestra.childIds,
+    resourceIds: nuestra.resourceIds,
+    isMilestone: nuestra.isMilestone,
+    status: mismoAvance ? o.status : nuestra.status,
+    constraint: mismaRestriccion ? o.constraint : nuestra.constraint,
+    ...(mismaRestriccion ? {} : { constraint2: undefined }),
+    deadline: nuestra.deadline,
+    calendarId: nuestra.calendarId,
+    levelingDelay: nuestra.levelingDelay,
+    ...(mismoRetraso ? {} : { levelingDelayMinutes: undefined }),
+    time,
+  } as Task;
+  if (!nuestra.isSummary && !childIds.length) delete (salida as { isSummary?: boolean }).isSummary;
+  else salida.isSummary = true;
+  if (nuestra.isHammock) salida.isHammock = true;
+  else delete (salida as { isHammock?: boolean }).isHammock;
+  return salida;
 }
 
 function aTask(t: MTarea, parentId: string | null, childIds: string[], resourceIds: string[]): Task {
@@ -416,6 +556,7 @@ const OPS_A_RECURSO: Partial<Record<ResourceType, TipoRecurso>> = {
 
 function desdeCalendario(c: WorkCalendar): MCalendario {
   return {
+    original: JSON.stringify(c),
     id: c.id,
     nombre: c.name || c.id,
     diasLaborales: [...c.workDays],
@@ -438,9 +579,7 @@ function desdeImport(r: ImportResult): ProyectoLeido {
   const tareas: MTarea[] = r.tasks.map((t) => {
     const x = t.time;
     const horas = horasPorCal.get(t.calendarId ?? r.calendar.id) ?? r.calendar.hoursPerDay ?? 8;
-    const dias = x.durationUnit === 'hours' && x.durationMinutes != null
-      ? x.durationMinutes / 60 / horas
-      : x.scheduleDuration;
+    const dias = diasDeTask(t, horas);
     const resumen = (t.childIds?.length ?? 0) > 0 || t.isSummary === true;
     return {
       id: t.id,
@@ -449,7 +588,8 @@ function desdeImport(r: ImportResult): ProyectoLeido {
       orden: orden.get(t.id) ?? 0,
       wbs: t.wbsCode || null,
       tipo: resumen ? 'resumen' : t.isMilestone ? 'hito' : t.isHammock ? 'hamaca' : 'tarea',
-      duracionDias: Math.round((dias || 0) * 1000) / 1000,
+      duracionDias: dias,
+      original: JSON.stringify(t),
       inicio: fecha(x.actualStart ?? x.scheduleStart ?? x.earlyStart) ?? r.project.startDate.slice(0, 10),
       restriccion: t.constraint ? { tipo: t.constraint.type, fecha: fecha(t.constraint.date) ?? null } : null,
       fechaLimite: fecha(t.deadline) ?? null,
@@ -466,17 +606,17 @@ function desdeImport(r: ImportResult): ProyectoLeido {
     const horas = r.calendar.hoursPerDay || 8;
     const desfase = s.lagMinutes != null ? s.lagMinutes / 60 / horas : s.lagDays;
     if (s.lagPercent != null) perdidas.push(`Relación con desfase en % convertida a días (${s.id}).`);
-    return { id: s.id, predecesoraId: s.predecessorId, sucesoraId: s.successorId, tipo: SEQ_A_TIPO[s.type] ?? 'FS', desfaseDias: Math.round((desfase || 0) * 1000) / 1000 };
+    return { id: s.id, predecesoraId: s.predecessorId, sucesoraId: s.successorId, tipo: SEQ_A_TIPO[s.type] ?? 'FS', desfaseDias: Math.round((desfase || 0) * 1000) / 1000, original: JSON.stringify(s) };
   });
   const recursos = r.resources.flatMap((x) => {
     const tipo = OPS_A_RECURSO[x.type];
     if (!tipo) { perdidas.push(`Recurso de costo omitido: ${x.name}.`); return []; }
-    return [{ id: x.id, nombre: x.name, tipo, capacidadDia: x.maxUnits ?? 1, unidad: x.unitOfMeasure ?? null, calendarioId: x.calendarId ?? null }];
+    return [{ id: x.id, nombre: x.name, tipo, capacidadDia: x.maxUnits ?? 1, unidad: x.unitOfMeasure ?? null, calendarioId: x.calendarId ?? null, original: JSON.stringify(x) }];
   });
   const idsRecursos = new Set(recursos.map((x) => x.id));
   const asignaciones = r.assignments
     .filter((a) => idsRecursos.has(a.resourceId))
-    .map((a) => ({ id: a.id, tareaId: a.taskId, recursoId: a.resourceId, unidadesDia: a.unitsPerDay }));
+    .map((a) => ({ id: a.id, tareaId: a.taskId, recursoId: a.resourceId, unidadesDia: a.unitsPerDay, original: JSON.stringify(a) }));
   const lineasBase = (r.baselines ?? []).map((b) => ({
     id: b.id, nombre: b.name, creadaEn: b.createdAt,
     tareas: b.tasks.map((t) => ({ tareaId: t.taskId, inicio: fecha(t.start)!, fin: fechaFin(t.finish)!, duracionDias: t.duration })),
@@ -488,6 +628,7 @@ function desdeImport(r: ImportResult): ProyectoLeido {
     perdidas: [...new Set(perdidas)],
     modelo: {
       proyecto: {
+        original: JSON.stringify(r.project),
         nombre: r.project.name || 'Proyecto importado',
         inicio: fecha(r.project.startDate) ?? tareas.map((t) => t.inicio).sort()[0] ?? fecha(new Date().toISOString())!,
         fechaEstado: fecha(r.project.statusDate) ?? null,
@@ -573,4 +714,22 @@ function escribirSinRuido(modelo: Modelo, formato: FormatoEscritura): ResultadoE
     if (e instanceof ErrorMotor) throw e;
     throw new ErrorMotor('ESCRITURA_FALLIDA', e instanceof Error ? e.message : String(e));
   }
+}
+
+/**
+ * Diagnóstico de fidelidad: calcula el archivo TAL COMO lo leyó OPS (sin pasar
+ * por el modelo en días), para comparar con `programar(leerArchivo(...))`.
+ */
+export async function programarArchivoOriginal(nombre: string, bytes: Uint8Array): Promise<{ fin: string | null; criticas: number; fines: Record<string, string> }> {
+  asegurarDom();
+  const texto = BINARIOS.test(nombre) ? undefined : decodificar(bytes);
+  const abierto = await silenciosoAsync(() => parseOpenedFile(BINARIOS.test(nombre) ? { name: nombre, bytes } : { name: nombre, text: texto }));
+  const r0 = isMultiDocumentImport(abierto) ? abierto.results[0] : abierto;
+  const tasks = cloneTasksForSolve(r0.tasks);
+  const input = solveInputFor(r0.project, tasks, r0.sequences, r0.calendar, [r0.calendar, ...(r0.resourceCalendars ?? [])]);
+  const res = silencioso(() => solveProject(input));
+  const hojas = tasks.filter((t) => !(t.childIds?.length));
+  const fines = Object.fromEntries(hojas.map((t) => [t.name, fechaFin(t.time.actualFinish ?? t.time.earlyFinish) ?? ""]));
+  const fs = Object.values(fines).filter(Boolean).sort();
+  return { fin: fs[fs.length - 1] ?? null, criticas: hojas.filter((t) => res.tasks.get(t.id)?.isCritical).length, fines };
 }

@@ -27,6 +27,9 @@ export interface MProyecto {
   umbralCasiCritica?: number | null;
   /** Number of float paths to compute (0/absent = off). */
   caminosHolgura?: number | null;
+  /** Fidelity: the element exactly as read from the file (JSON, opaque). The motor starts from it and
+   *  overrides only what the model changed, so P6/MSP data (hours, remaining work, types) survive. */
+  original?: string | null;
 }
 
 export interface MFeriado { nombre: string; desde: string; hasta: string }
@@ -42,6 +45,9 @@ export interface MCalendario {
   feriados: MFeriado[];
   /** Days that become working days (e.g. a Saturday shift). */
   diasExtra?: MFeriado[];
+  /** Fidelity: the element exactly as read from the file (JSON, opaque). The motor starts from it and
+   *  overrides only what the model changed, so P6/MSP data (hours, remaining work, types) survive. */
+  original?: string | null;
 }
 
 export interface MRestriccion { tipo: TipoRestriccion; fecha?: string | null }
@@ -69,6 +75,9 @@ export interface MTarea {
   /** External identifier from the imported file (P6 activity id / MSP UID), kept for round trips. */
   idExterno?: string | null;
   notas?: string | null;
+  /** Fidelity: the element exactly as read from the file (JSON, opaque). The motor starts from it and
+   *  overrides only what the model changed, so P6/MSP data (hours, remaining work, types) survive. */
+  original?: string | null;
 }
 
 export interface MRelacion {
@@ -77,6 +86,9 @@ export interface MRelacion {
   sucesoraId: string;
   tipo: TipoRelacion;
   desfaseDias: number;
+  /** Fidelity: the element exactly as read from the file (JSON, opaque). The motor starts from it and
+   *  overrides only what the model changed, so P6/MSP data (hours, remaining work, types) survive. */
+  original?: string | null;
 }
 
 export interface MRecurso {
@@ -87,6 +99,9 @@ export interface MRecurso {
   capacidadDia: number;
   unidad?: string | null;
   calendarioId?: string | null;
+  /** Fidelity: the element exactly as read from the file (JSON, opaque). The motor starts from it and
+   *  overrides only what the model changed, so P6/MSP data (hours, remaining work, types) survive. */
+  original?: string | null;
 }
 
 export interface MAsignacion {
@@ -94,6 +109,9 @@ export interface MAsignacion {
   tareaId: string;
   recursoId: string;
   unidadesDia: number;
+  /** Fidelity: the element exactly as read from the file (JSON, opaque). The motor starts from it and
+   *  overrides only what the model changed, so P6/MSP data (hours, remaining work, types) survive. */
+  original?: string | null;
 }
 
 export interface MLineaBase {
