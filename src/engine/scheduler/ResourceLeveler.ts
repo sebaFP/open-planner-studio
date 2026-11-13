@@ -253,8 +253,12 @@ export function levelResources(
   // tweede ronde zou boven op de boekingen van de eerste rekenen (en een andere uitkomst geven).
   const mayRetry = options.poolLedger === undefined;
   for (let round = 0; mayRetry && round < MAX_VIOLATION_ROUNDS && countOf(best) > 0; round++) {
+    // Een harde pin schuift in geen enkele ronde: hem vooraan zetten verandert niets (een nieuwe ronde zou
+    // dezelfde uitkomst geven), dus alleen de andere schenders tellen voor een volgende ronde.
+    const pins = new Set(tasks.filter(t => t.constraint?.hard === true
+      && (t.constraint.type === 'MSO' || t.constraint.type === 'MFO')).map(t => t.id));
     const fresh = [...best.introducedViolations!.constraintTaskIds, ...best.introducedViolations!.deadlineTaskIds]
-      .filter(id => !first.has(id));
+      .filter(id => !first.has(id) && !pins.has(id));
     if (fresh.length === 0) break;                       // stond al vooraan en schendt nog: geen uitweg
     for (const id of fresh) first.add(id);
     const next = run([...first]);

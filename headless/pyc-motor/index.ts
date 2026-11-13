@@ -23,6 +23,7 @@ import { solveProject, cloneTasksForSolve } from '@/engine/scheduler/solveProjec
 import { solveInputFor, solveOptionsFor } from '@/engine/scheduler/solveInput';
 import { levelResources } from '@/engine/scheduler/ResourceLeveler';
 import type { CPMResult } from '@/engine/scheduler/CPMSolver';
+import { blocksClock, dayEndInstant } from '@/engine/calendar/workdayRules';
 import { builtInProfile } from '@/engine/scheduler/conventions/registry';
 import { writeMSPDIWithReport } from '@/services/msproject/mspdiWriter';
 import { writeP6XMLWithReport } from '@/services/p6/p6xmlWriter';
@@ -279,13 +280,43 @@ function traducir(m: Modelo): Traducido {
       if (!o || !mismoNumero(o.unitsPerDay, a.unidadesDia)) return nuestra;
       return { ...o, id: a.id, taskId: a.tareaId, resourceId: a.recursoId };
     });
-  // Un hito que cierra algo (le llega una relación FS o FF) cae en el INSTANTE de fin de la predecesora,
+  // Un hito que CIERRA algo (le llega una relación FS o FF) cae en el INSTANTE de fin de la predecesora,
   // como en P6 y en Project: sin esto el motor lo empuja al inicio del siguiente día laboral (viernes 16:00
-  // → lunes 08:00), y el hito incumple su fecha límite aunque la ruta tenga holgura 0. Un hito que ya trae
-  // su clase del archivo (P6/MSP) la conserva.
-  const llegaFin = new Set(sequences.filter((q) => q.type === 'FINISH_START' || q.type === 'FINISH_FINISH').map((q) => q.successorId));
+  // → lunes 08:00), y el hito incumple su fecha límite aunque la ruta tenga holgura 0. Solo se marca cuando
+  // no hay nada que lo haga ambiguo: sin SS/SF entrante ni restricción de inicio (MSO/SNET/SNLT) el hito es
+  // sin duda de fin. En cualquier otro caso queda SIN clase y el motor infiere como siempre (`milestoneKind`
+  // undefined); lo mismo un hito que ya trae su clase del archivo (P6/MSP).
+  const entrantes = new Map<string, Set<string>>();
+  for (const q of sequences) {
+    const l = entrantes.get(q.successorId) ?? new Set<string>();
+    l.add(q.type);
+    entrantes.set(q.successorId, l);
+  }
   for (const t of tasks) {
-    if (t.isMilestone && !t.isSummary && !t.milestoneKind) t.milestoneKind = llegaFin.has(t.id) ? 'FINISH' : 'START';
+    if (!t.isMilestone || t.isSummary || t.milestoneKind) continue;
+    const tipos = entrantes.get(t.id);
+    const llegaFin = !!tipos && (tipos.has('FINISH_START') || tipos.has('FINISH_FINISH'));
+    const llegaInicio = !!tipos && (tipos.has('START_START') || tipos.has('START_FINISH'));
+    const restriccionInicio = [t.constraint, t.constraint2].some((c) => c && (c.type === 'MSO' || c.type === 'SNET' || c.type === 'SNLT'));
+    if (llegaFin && !llegaInicio && !restriccionInicio) t.milestoneKind = 'FINISH';
+  }
+  // Un fin real sin hora («2026-01-09») significa el FINAL de esa jornada, no su medianoche: el motor lo toma
+  // como 00:00 y retrocede al último instante laboral (jueves 16:00), con lo que un hito de fin que la sigue
+  // (FS/FF) queda un día laboral antes (perfil msproject). Solo para las predecesoras de un hito de fin se
+  // normaliza al cierre de la jornada del calendario de la tarea; el resto de las tareas calcula como siempre.
+  const hitosFin = new Set(tasks.filter((t) => t.milestoneKind === 'FINISH').map((t) => t.id));
+  const antesDeHitoFin = new Set(sequences
+    .filter((q) => hitosFin.has(q.successorId) && (q.type === 'FINISH_START' || q.type === 'FINISH_FINISH'))
+    .map((q) => q.predecessorId));
+  const relojes = new Map<string, ReturnType<typeof blocksClock>>();
+  for (const t of tasks) {
+    const af = t.time.actualFinish;
+    if (!af || t.isSummary || !antesDeHitoFin.has(t.id) || !/^\d{4}-\d{2}-\d{2}$/.test(af)) continue;
+    const cal = calendars.find((c) => c.id === t.calendarId) ?? calendar;
+    const reloj = relojes.get(cal.id) ?? blocksClock(cal);
+    relojes.set(cal.id, reloj);
+    const fin = dayEndInstant(reloj, af);
+    if (fin) t.time.actualFinish = fin;
   }
   const baselines: Baseline[] = (m.lineasBase ?? []).map((b) => ({
     id: b.id, name: b.nombre, createdAt: b.creadaEn, projectEnd: '', projectDuration: 0,
@@ -473,7 +504,9 @@ export function programar(modelo: Modelo): ResultadoProgramacion {
     // un día completo de 24 h) se muestra el día que termina, no el siguiente; un hito de inicio, el día
     // de su instante. Sin esto el hito de un calendario 7x24 salía con el inicio después del fin.
     const hito = !!t.isMilestone && !t.isSummary && !(x.scheduleDuration > 0);
-    const dia = (s: string | null | undefined) => (hito && t.milestoneKind === 'FINISH' ? fechaFin(s) : fecha(s))!;
+    // Un hito sin clase pero con una restricción de FIN (MFO/FNET/FNLT) también marca el final de un día.
+    const comoFin = t.milestoneKind === 'FINISH' || (!t.milestoneKind && [t.constraint, t.constraint2].some((c) => c && (c.type === 'MFO' || c.type === 'FNET' || c.type === 'FNLT')));
+    const dia = (s: string | null | undefined) => (hito && comoFin ? fechaFin(s) : fecha(s))!;
     const ini = (s: string | null | undefined) => (hito ? dia(s) : fecha(s)!);
     const fn = (s: string | null | undefined, comoInicio: string | null | undefined) => (hito ? dia(comoInicio ?? s) : fechaFin(s)!);
     return {

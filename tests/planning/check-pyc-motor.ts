@@ -75,12 +75,67 @@ for (const perfil of ['ops', 'p6', 'msproject'] as const) {
   eq('A9 hito inicial intacto', [fechas(ri, 'M'), fechas(ri, 'B')], ['2026-01-07..2026-01-07', '2026-01-07..2026-01-08']);
 }
 
+{
+  // Hitos con SS/SF entrantes y salientes, y con restricciones, en 7x24 y 5x8: el resultado es siempre un solo
+  // día (inicio = fin), las relaciones salientes SS/SF no agregan un día y no aparece holgura falsa.
+  const resumen = (r: ReturnType<typeof programar>) => r.tareas.map(t => `${t.id} ${t.inicio}..${t.fin} TF${t.holguraTotal}`).join(' | ');
+  const casos: [string, Modelo, string][] = [
+    ['U1 7x24 A→M FS, M→B SS', M([T('A', 3), T('M', 0), T('B', 2)], [R('A', 'M'), R('M', 'B', 'SS')]),
+      'A 2026-01-05..2026-01-07 TF0 | M 2026-01-07..2026-01-07 TF0 | B 2026-01-08..2026-01-09 TF0'],
+    ['U2 5x8 A→M FS, M→B SS', M([T('A', 3), T('M', 0), T('B', 2)], [R('A', 'M'), R('M', 'B', 'SS')], { cal: 'c5' }),
+      'A 2026-01-05..2026-01-07 TF0 | M 2026-01-07..2026-01-07 TF0 | B 2026-01-08..2026-01-09 TF0'],
+    ['U3 7x24 A→M FS, M→B SF (sin holgura falsa)', M([T('A', 3), T('M', 0), T('B', 2)], [R('A', 'M'), R('M', 'B', 'SF')]),
+      'A 2026-01-05..2026-01-07 TF0 | M 2026-01-07..2026-01-07 TF0 | B 2026-01-06..2026-01-07 TF0'],
+    ['U4 5x8 A→M FS, M→B SF', M([T('A', 3), T('M', 0), T('B', 2)], [R('A', 'M'), R('M', 'B', 'SF')], { cal: 'c5' }),
+      'A 2026-01-05..2026-01-07 TF0 | M 2026-01-07..2026-01-07 TF0 | B 2026-01-06..2026-01-07 TF0'],
+    ['U5 7x24 hito MFO 01-08 sin entrante', M([T('M', 0, { restriccion: { tipo: 'MFO', fecha: '2026-01-08' } }), T('B', 1)], [R('M', 'B')]),
+      'M 2026-01-08..2026-01-08 TF0 | B 2026-01-09..2026-01-09 TF0'],
+    ['U6 7x24 hito FNET 01-08 sin entrante', M([T('M', 0, { restriccion: { tipo: 'FNET', fecha: '2026-01-08' } }), T('B', 1)], [R('M', 'B')]),
+      'M 2026-01-08..2026-01-08 TF0 | B 2026-01-09..2026-01-09 TF0'],
+    ['U7 7x24 hito con FS entrante y MSO 01-08', M([T('A', 1), T('M', 0, { restriccion: { tipo: 'MSO', fecha: '2026-01-08' } })], [R('A', 'M')]),
+      'A 2026-01-05..2026-01-05 TF2 | M 2026-01-08..2026-01-08 TF0'],
+    ['U8 7x24 hito con FS entrante y SNET 01-08', M([T('A', 1), T('M', 0, { restriccion: { tipo: 'SNET', fecha: '2026-01-08' } })], [R('A', 'M')]),
+      'A 2026-01-05..2026-01-05 TF2 | M 2026-01-08..2026-01-08 TF0'],
+    ['U9 5x8 hito FS entrante y SNET 01-12', M([T('A', 3), T('M', 0, { restriccion: { tipo: 'SNET', fecha: '2026-01-12' } })], [R('A', 'M')], { cal: 'c5' }),
+      'A 2026-01-05..2026-01-07 TF2 | M 2026-01-12..2026-01-12 TF0'],
+    ['U10 5x8 hito solo con SS entrante', M([T('A', 3), T('M', 0)], [R('A', 'M', 'SS')], { cal: 'c5' }),
+      'A 2026-01-05..2026-01-07 TF0 | M 2026-01-05..2026-01-05 TF2'],
+    ['U11 5x8 hito solo con SF entrante', M([T('A', 3), T('M', 0)], [R('A', 'M', 'SF')], { cal: 'c5' }),
+      'A 2026-01-05..2026-01-07 TF0 | M 2026-01-05..2026-01-05 TF3'],
+    ['U12 5x8 hito con FS y SS entrantes (sin holguras espurias)', M([T('A', 3), T('B', 2, { inicio: '2026-01-12' }), T('M', 0)], [R('A', 'M'), R('B', 'M', 'SS')], { cal: 'c5' }),
+      'A 2026-01-05..2026-01-07 TF3 | B 2026-01-12..2026-01-13 TF0 | M 2026-01-12..2026-01-12 TF1'],
+    ['U13 7x24 hito con FS y SF entrantes', M([T('A', 3), T('B', 2), T('M', 0)], [R('A', 'M'), R('B', 'M', 'SF')]),
+      'A 2026-01-05..2026-01-07 TF0 | B 2026-01-05..2026-01-06 TF1 | M 2026-01-08..2026-01-08 TF0'],
+  ];
+  for (const [label, m, esperado] of casos) {
+    const r = programar(m);
+    eq(label, resumen(r), esperado);
+    ok(`${label}: nunca inicio > fin`, r.tareas.every(t => t.inicio <= t.fin), JSON.stringify(r.tareas.map(t => [t.id, t.inicio, t.fin])));
+  }
+  // Un hito con clase propia (viene de un archivo) la conserva: de inicio ⇒ el motor lo corre al siguiente
+  // día laboral como siempre; de fin ⇒ queda en el fin de la predecesora.
+  const origenHito = (kind: 'START' | 'FINISH') => JSON.stringify({
+    id: 'M', name: 'M', description: '', wbsCode: '', taskType: 'CONSTRUCTION', status: 'NOT_STARTED', isMilestone: true, milestoneKind: kind,
+    priority: 500, parentId: null, childIds: [], resourceIds: [],
+    time: { durationType: 'WORKTIME', durationUnit: 'days', scheduleDuration: 0, scheduleStart: '2026-01-05', scheduleFinish: '2026-01-05', earlyStart: '2026-01-05', earlyFinish: '2026-01-05', lateStart: '2026-01-05', lateFinish: '2026-01-05', freeFloat: 0, totalFloat: 0, isCritical: false, completion: 0 },
+  });
+  for (const kind of ['START', 'FINISH'] as const) {
+    const r = programar(M([T('A', 5), T('M', 0, { original: origenHito(kind) })], [R('A', 'M')], { cal: 'c5' }));
+    eq(`U14 hito con clase propia ${kind}`, fechas(r, 'M'), kind === 'FINISH' ? '2026-01-09..2026-01-09' : '2026-01-12..2026-01-12');
+  }
+  // msproject: una predecesora terminada con fin real sin hora no adelanta el hito un día laboral.
+  const rp = programar(M([T('A', 5, { avance: 1, inicioReal: '2026-01-05', finReal: '2026-01-09' }), T('M', 0), T('B', 2)], [R('A', 'M'), R('M', 'B')], { cal: 'c5', perfil: 'msproject', fe: '2026-01-12' }));
+  eq('U15 msproject, A terminada: hito el día del fin real', [fechas(rp, 'M'), fechas(rp, 'B')], ['2026-01-09..2026-01-09', '2026-01-12..2026-01-13']);
+  const rq = programar(M([T('A', 5, { avance: 0.5, inicioReal: '2026-01-05' }), T('M', 0)], [R('A', 'M')], { cal: 'c5', perfil: 'msproject', fe: '2026-01-07' }));
+  eq('U16 msproject, A en curso: hito al terminar A', fechas(rq, 'M'), '2026-01-09..2026-01-09');
+}
+
 // ── B. MSO es un pin duro: manda sobre la lógica y la relación violada se informa ─────────────
 for (const perfil of ['ops', 'p6', 'msproject'] as const) {
   const r = programar(M([T('A', 3), T('B', 2, { restriccion: { tipo: 'MSO', fecha: '2026-01-06' } })], [R('A', 'B')], { perfil }));
   eq(`B1 ${perfil} B queda en el 6`, fechas(r, 'B'), '2026-01-06..2026-01-07');
   eq(`B1 ${perfil} holgura de B`, por(r, 'B').holguraTotal, 0);
-  ok(`B1 ${perfil} holgura negativa en A`, por(r, 'A').holguraTotal < 0, String(por(r, 'A').holguraTotal));
+  eq(`B1 ${perfil} holgura de A (relación violada)`, por(r, 'A').holguraTotal, -2);
   ok(`B1 ${perfil} informa la violación`, r.restriccionesVioladas.includes('B'), JSON.stringify(r.restriccionesVioladas));
 }
 {
@@ -104,6 +159,37 @@ for (const perfil of ['ops', 'p6', 'msproject'] as const) {
   eq(`C1 ${perfil} A sin holgura negativa`, [por(r, 'A').holguraTotal, por(r, 'A').holguraLibre], [0, 0]);
   eq(`C1 ${perfil} B`, por(r, 'B').holguraTotal, 0);
   eq(`C1 ${perfil} sin restricciones`, r.restriccionesVioladas, []);
+}
+
+{
+  // C en secuencia: una tarea en curso cuya predecesora terminó, o una en curso sola, no cambia (sin holgura
+  // espuria en la predecesora ni inicio tardío distinto del temprano con holgura 0).
+  const enSecuencia = M([T('A', 3, { avance: 1, inicioReal: '2026-01-05', finReal: '2026-01-07' }), T('B', 4, { avance: 0.5, inicioReal: '2026-01-08' })], [R('A', 'B')], { cal: 'c5', fe: '2026-01-09' });
+  for (const [perfil, tfA] of [['ops', 0], ['msproject', 1]] as const) {
+    const m = structuredClone(enSecuencia); m.proyecto.perfil = perfil;
+    const r = programar(m);
+    eq(`C2 ${perfil} en secuencia: holgura de A y B`, [por(r, 'A').holguraTotal, por(r, 'B').holguraTotal], [tfA, 0]);
+  }
+  const sola = programar(M([T('B', 4, { avance: 0.5, inicioReal: '2026-01-05' })], [], { cal: 'c5', fe: '2026-01-07' }));
+  eq('C3 tarea en curso sola: inicio tardío = temprano, holgura 0', [por(sola, 'B').inicioTardio, por(sola, 'B').inicioTemprano, por(sola, 'B').holguraTotal], ['2026-01-05', '2026-01-05', 0]);
+}
+{
+  // Restricciones importadas sin editar conservan el significado de su herramienta: la MSO «suave» de P6
+  // («Start On») sigue suave y la obligatoria (P6 Mandatory Start, MS Project Must Start On) sigue dura;
+  // si se edita la fecha pasa a ser un pin duro. (La asignación de `hard` por formato la hacen los lectores.)
+  const origen = (constraint: object) => JSON.stringify({
+    id: 'B', name: 'B', description: '', wbsCode: '', taskType: 'CONSTRUCTION', status: 'NOT_STARTED', isMilestone: false,
+    priority: 500, parentId: null, childIds: [], resourceIds: [], constraint,
+    time: { durationType: 'WORKTIME', durationUnit: 'days', scheduleDuration: 2, scheduleStart: '2026-01-05', scheduleFinish: '2026-01-05', earlyStart: '2026-01-05', earlyFinish: '2026-01-05', lateStart: '2026-01-05', lateFinish: '2026-01-05', freeFloat: 0, totalFloat: 0, isCritical: false, completion: 0 },
+  });
+  const con = (constraint: object, fecha = '2026-01-06') =>
+    programar(M([T('A', 3), T('B', 2, { restriccion: { tipo: 'MSO', fecha }, original: origen(constraint) })], [R('A', 'B')]));
+  const suave = con({ type: 'MSO', date: '2026-01-06' });
+  eq('H1 MSO suave del archivo (P6 Start On) sigue suave: la lógica manda', [fechas(suave, 'B'), suave.restriccionesVioladas], ['2026-01-08..2026-01-09', ['B']]);
+  const dura = con({ type: 'MSO', date: '2026-01-06', hard: true });
+  eq('H2 MSO dura del archivo (Mandatory Start / Must Start On) sigue dura', [fechas(dura, 'B'), dura.restriccionesVioladas], ['2026-01-06..2026-01-07', ['B']]);
+  const editada = con({ type: 'MSO', date: '2026-01-06' }, '2026-01-07');
+  eq('H3 fecha editada: pin duro', fechas(editada, 'B'), '2026-01-07..2026-01-08');
 }
 
 // ── E. La nivelación respeta restricciones ────────────────────────────────────────────────────

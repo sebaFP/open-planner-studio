@@ -37,6 +37,22 @@ export interface RelationBoundaryFlags {
 }
 
 /** Bereken de mijlpaal-grensvlaggen voor het (voorganger, opvolger)-paar (één bron van waarheid). */
+/** Het startmoment dat een SS/SF-opvolger ziet bij een EINDmijlpaal als voorganger: de mijlpaal staat op het
+ *  eind van een werkblok (vr 16:00), dus zijn "start" is het eerstvolgende werkmoment erna. Ligt zijn moment al
+ *  op een geldig begin van een werkblok (een 24-uurskalender: het eind van de dag ís het begin van de volgende),
+ *  dan is dat moment zelf de start en komt er geen dag bij. */
+function finishMilestoneStartMoment(deps: RelationDeps, pe: CalendarEngine, es: Date): Date {
+  return deps.snapOnOrAfter(pe, es).getTime() === es.getTime() ? es : deps.snapStrictAfter(pe, es);
+}
+
+/** Spiegel van `finishMilestoneStartMoment` voor de achterwaartse pass: een moment dat tegelijk begin én eind
+ *  van een werkblok is (24-uurskalender) hoeft niet een blok terug. */
+function finishMilestonePredStart(deps: RelationDeps, pe: CalendarEngine, shifted: Date): Date {
+  const t = shifted.getTime();
+  return deps.snapOnOrAfter(pe, shifted).getTime() === t && deps.snapOnOrBefore(pe, shifted).getTime() === t
+    ? shifted : deps.snapStrictBefore(pe, shifted);
+}
+
 export function relationBoundaryFlags(
   predTask: Task,
   succTask: Task,
@@ -379,7 +395,7 @@ function forwardHour(
 
   switch (seq.type) {
     case 'START_START': {
-      const base = predStartsNextDay ? deps.snapStrictAfter(pe, predResult.es) : predResult.es;
+      const base = predStartsNextDay ? finishMilestoneStartMoment(deps, pe, predResult.es) : predResult.es;
       // De `deps.snapOnOrAfter(se, …)`-omhulling forceert een werk-instant van de OPVOLGER-kalender —
       // voor een ELAPSEDTIME-opvolger juist niet gewenst (de `shiftLagPred`/`elapsedMin`-uitkomst
       // zelf blijft ongemoeid: die interpreteert de LAG in de geselecteerde lagkalender, een
@@ -576,7 +592,7 @@ function sfReqFinishHour(
 
   // T8: een dagtaak bindt aan het echte startmoment, ook bij een eindmijlpaal.
   const daySuccessor = isDayTaskOnBands(deps, successor);
-  const startMoment = predStartsNextDay && !daySuccessor ? deps.snapStrictAfter(pe, predResult.es) : predResult.es;
+  const startMoment = predStartsNextDay && !daySuccessor ? finishMilestoneStartMoment(deps, pe, predResult.es) : predResult.es;
   if (elapsed) {
     return succElapsed
       ? new Date(startMoment.getTime() + elapsedMin())
@@ -613,7 +629,7 @@ function backwardHour(
       const shifted = elapsed
         ? new Date(succResult.ls.getTime() - elapsedMin())
         : deps.shiftLagPred(lagEng, succResult.ls, seq, predTask, -1);
-      const predStart = predStartsNextDay ? deps.snapStrictBefore(pe, shifted)
+      const predStart = predStartsNextDay ? finishMilestonePredStart(deps, pe, shifted)
         : elapsed ? deps.snapOnOrBefore(pe, shifted) : shifted;
       return deps.finishFromStart(pe, predStart, predTask);
     }
@@ -639,7 +655,7 @@ function backwardHour(
       const shifted = elapsed
         ? new Date(succResult.lf.getTime() - elapsedMin())
         : deps.shiftLagPred(lagEng, succResult.lf, seq, predTask, -1);
-      const predStart = predStartsNextDay ? deps.snapStrictBefore(pe, shifted)
+      const predStart = predStartsNextDay ? finishMilestonePredStart(deps, pe, shifted)
         : elapsed ? deps.snapOnOrBefore(pe, shifted) : shifted;
       return deps.finishFromStart(pe, predStart, predTask);
     }

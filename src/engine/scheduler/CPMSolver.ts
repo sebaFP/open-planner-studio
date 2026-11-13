@@ -458,6 +458,9 @@ export class CPMSolver {
    *  werkelijke start blijft (zonder A19). De relatie-vrije-speling meet daartegen als de relatie buiten
    *  volgorde ligt (de werkelijke start vóór de relatiegrens van de voorganger). */
   private remainingStarts: Map<string, Date> = new Map();
+  /** Late start van het RESTWERK van een lopende taak (LF − rest), alleen zonder A19; de achterwaartse pass gebruikt
+   *  hem voor voorgangers waarvan de relatie buiten volgorde ligt. Per `backwardPass` opnieuw gevuld. */
+  private remainingLateStarts: Map<string, Date> = new Map();
   // Relaties waarvan de lead in de forward-pass door de projectstart-vloer is afgekapt.
   private truncatedLeadIds: string[] = [];
   // Taken met een harde MSO/MFO-pin waarvan de voorganger-druk (`rawMax`) later
@@ -3818,6 +3821,7 @@ export class CPMSolver {
     earlyDates: Map<string, { es: Date; ef: Date }>,
   ): Map<string, { ls: Date; lf: Date }> {
     const results = new Map<string, { ls: Date; lf: Date }>();
+    this.remainingLateStarts.clear();
 
     // Find project end date (latest early finish)
     let projectEnd = new Date(0);
@@ -4155,8 +4159,12 @@ export class CPMSolver {
         // gewone relatie-lag symmetrisch toepast: de delay komt NÁ de relatiewiskunde, dus de spiegel
         // ervóór. `projectEnd` komt los hiervan al uit `earlyDates` (inclusief elke delay).
         const succCal = this.calendarFor(succTask);
+        const remainingLs = this.remainingLateStarts.get(seq.successorId);
+        const relationLimit = this.seqConstraint.get(seq.id);
+        const succEarlyEs = earlyDates.get(seq.successorId)?.es;
+        const outOfSequence = !!remainingLs && !!relationLimit && !!succEarlyEs && succEarlyEs < relationLimit;
         const delayShiftedSuccResult = {
-          ls: this.shiftByLevelingDelay(succCal, succTask, succResult.ls, -1),
+          ls: this.shiftByLevelingDelay(succCal, succTask, outOfSequence ? remainingLs : succResult.ls, -1),
           lf: this.shiftByLevelingDelay(succCal, succTask, succResult.lf, -1),
         };
         // C6, late kant: van een SS-lag uit deze LOPENDE taak telt ook achterwaarts alleen de rest-lag
@@ -4205,19 +4213,20 @@ export class CPMSolver {
       // of MSP telt als urenmaat. Met de wacht kreeg A (0,5 d, FS naar B) een late finish op de vorige
       // werkdag en negatieve speling.
 
-      // Een lopende taak zonder A19 (OPS, MS Project): de voorwaartse pass pint haar ES op de werkelijke
-      // start en plant alleen het RESTWERK (`remStart` + rest). De late start die de voorgangers van haar
-      // eisen hoort dan ook de start van dat restwerk te zijn (LF − rest), niet LF − de volle duur: de
-      // volle duur vanaf de late finish laat een voorganger die nog loopt tegen een start aanlopen die in
-      // het verleden ligt, en geeft die voorganger een valse negatieve speling (taak buiten volgorde).
-      // P6 (A19) heeft zijn eigen tak hierboven; een taak zonder voortgang rekent zoals altijd.
-      const useRemainingLateStart = !useP6RemainingProgress
-        && !task.isSummary && !task.isHammock && !isZeroDurationMilestone(task)
-        && this.options.schedulingOptions?.p6UseRemainingStartForProgress !== true
-        && isPinnedInProgress(task.time);
-      const computedLateStart = useP6RemainingProgress || useRemainingLateStart
+      const computedLateStart = useP6RemainingProgress
         ? this.subRemainingDuration(predCal, lateFinish, task)
         : this.subDuration(predCal, lateFinish, task, earlyDates.get(taskId)?.es ?? null);
+      // Een lopende taak zonder A19 (OPS, MS Project): de voorwaartse pass pint haar ES op de werkelijke
+      // start en plant alleen het RESTWERK. Staat zij BUITEN VOLGORDE (haar werkelijke start ligt vóór de
+      // relatiegrens van een voorganger), dan hoort die voorganger zijn late finish tegen de start van dat
+      // restwerk (LF − rest) te meten, niet tegen LF − de volle duur: anders krijgt hij een valse negatieve
+      // speling. Alleen DIE relatiegrens leest `remainingLateStart` (zie de opvolgerlus); de getoonde LS blijft
+      // `computedLateStart`, en een taak in volgorde verandert niet.
+      if (!useP6RemainingProgress && !task.isSummary && !task.isHammock && !isZeroDurationMilestone(task)
+        && this.options.schedulingOptions?.p6UseRemainingStartForProgress !== true
+        && isPinnedInProgress(task.time)) {
+        this.remainingLateStarts.set(taskId, this.subRemainingDuration(predCal, lateFinish, task));
+      }
       // Bij P6-voortgang is een geregistreerde actual start ook de getoonde LS; LF blijft uit het
       // resterende netwerk volgen. Zonder bronvlag blijft de berekende late start leidend.
       let lateStart = preserveActualDates && task.time.actualStart && task.time.completion < 1
@@ -4239,7 +4248,7 @@ export class CPMSolver {
 
       this.recordBackwardFloatTrace(taskId, {
         lateFinishSource,
-        lateStartSource: useP6RemainingProgress || useRemainingLateStart ? 'subRemainingDuration' : 'subDuration',
+        lateStartSource: useP6RemainingProgress ? 'subRemainingDuration' : 'subDuration',
       });
       results.set(taskId, { ls: lateStart, lf: lateFinish });
     }
