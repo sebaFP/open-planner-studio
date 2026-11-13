@@ -369,7 +369,14 @@ function aTask(t: MTarea, parentId: string | null, childIds: string[], resourceI
   const inicio = fecha(t.inicio) ?? fecha(new Date().toISOString())!;
   const restriccion: TaskConstraint | undefined =
     t.restriccion && t.restriccion.tipo !== 'ASAP'
-      ? { type: t.restriccion.tipo, ...(t.restriccion.fecha ? { date: fecha(t.restriccion.fecha) } : {}) }
+      ? {
+        type: t.restriccion.tipo,
+        ...(t.restriccion.fecha ? { date: fecha(t.restriccion.fecha) } : {}),
+        // «Debe empezar / terminar el»: un pin duro como en P6 (Mandatory) y Project (honrar restricciones).
+        // Manda sobre la lógica en TODOS los perfiles; si la lógica lo contradice, la relación queda violada
+        // (holgura negativa en la predecesora, `restriccionesVioladas`), nunca la fecha corrida en silencio.
+        ...(t.restriccion.tipo === 'MSO' || t.restriccion.tipo === 'MFO' ? { hard: true } : {}),
+      }
       : undefined;
   return {
     id: t.id,

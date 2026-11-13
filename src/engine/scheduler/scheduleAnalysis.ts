@@ -458,7 +458,12 @@ export function computeScheduleResults(input: ScheduleAnalysisInput): CPMResult 
     {
       for (const cc of [task.constraint, task.constraint2]) {
         if (!cc) continue;
-        if (cc.hard && (cc.type === 'MSO' || cc.type === 'MFO')) continue;
+        // Een harde pin op een taak die al is gestart of voltooid blijft hier buiten beeld (het geregistreerde
+        // feit wint; `hardPinRespectedByActual` beoordeelt of het met de pin klopt). Op een taak zonder
+        // voortgang moet de pin standhouden: schuift de statusdatum, het projectanker of een
+        // nivelleringsvertraging `early.es` voorbij de pin, dan is dat een geschonden constraint zoals elke andere.
+        if (cc.hard && (cc.type === 'MSO' || cc.type === 'MFO')
+          && (task.time.actualStart || task.time.actualFinish)) continue;
         const cd = constraintInstant(cc, cal);
         if (!cd) continue;
         // Een MSO/MFO/SNLT op een nulduurmijlpaal toetst tegen hetzelfde moment als de late pass.
