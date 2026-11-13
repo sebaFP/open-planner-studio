@@ -279,6 +279,14 @@ function traducir(m: Modelo): Traducido {
       if (!o || !mismoNumero(o.unitsPerDay, a.unidadesDia)) return nuestra;
       return { ...o, id: a.id, taskId: a.tareaId, resourceId: a.recursoId };
     });
+  // Un hito que cierra algo (le llega una relación FS o FF) cae en el INSTANTE de fin de la predecesora,
+  // como en P6 y en Project: sin esto el motor lo empuja al inicio del siguiente día laboral (viernes 16:00
+  // → lunes 08:00), y el hito incumple su fecha límite aunque la ruta tenga holgura 0. Un hito que ya trae
+  // su clase del archivo (P6/MSP) la conserva.
+  const llegaFin = new Set(sequences.filter((q) => q.type === 'FINISH_START' || q.type === 'FINISH_FINISH').map((q) => q.successorId));
+  for (const t of tasks) {
+    if (t.isMilestone && !t.isSummary && !t.milestoneKind) t.milestoneKind = llegaFin.has(t.id) ? 'FINISH' : 'START';
+  }
   const baselines: Baseline[] = (m.lineasBase ?? []).map((b) => ({
     id: b.id, name: b.nombre, createdAt: b.creadaEn, projectEnd: '', projectDuration: 0,
     tasks: b.tareas.map((t) => ({ taskId: t.tareaId, start: t.inicio, finish: t.fin, duration: t.duracionDias, isMilestone: false })),
@@ -454,14 +462,21 @@ export function programar(modelo: Modelo): ResultadoProgramacion {
   const tareas: ResultadoTarea[] = tr.tasks.map((t) => {
     const c = r.tasks.get(t.id);
     const x = t.time;
+    // Un hito es un punto: inicio y fin son el MISMO día. Un hito de fin que cae en el instante 00:00 (fin de
+    // un día completo de 24 h) se muestra el día que termina, no el siguiente; un hito de inicio, el día
+    // de su instante. Sin esto el hito de un calendario 7x24 salía con el inicio después del fin.
+    const hito = !!t.isMilestone && !t.isSummary && !(x.scheduleDuration > 0);
+    const dia = (s: string | null | undefined) => (hito && t.milestoneKind === 'FINISH' ? fechaFin(s) : fecha(s))!;
+    const ini = (s: string | null | undefined) => (hito ? dia(s) : fecha(s)!);
+    const fn = (s: string | null | undefined, comoInicio: string | null | undefined) => (hito ? dia(comoInicio ?? s) : fechaFin(s)!);
     return {
       id: t.id,
-      inicio: fecha(x.actualStart ?? x.earlyStart ?? x.scheduleStart)!,
-      fin: fechaFin(x.actualFinish ?? x.earlyFinish ?? x.scheduleFinish)!,
-      inicioTemprano: fecha(c?.earlyStart ?? x.earlyStart)!,
-      finTemprano: fechaFin(c?.earlyFinish ?? x.earlyFinish)!,
-      inicioTardio: fecha(c?.lateStart ?? x.lateStart)!,
-      finTardio: fechaFin(c?.lateFinish ?? x.lateFinish)!,
+      inicio: ini(x.actualStart ?? x.earlyStart ?? x.scheduleStart),
+      fin: fn(x.actualFinish ?? x.earlyFinish ?? x.scheduleFinish, x.actualStart ?? x.earlyStart ?? x.scheduleStart),
+      inicioTemprano: ini(c?.earlyStart ?? x.earlyStart),
+      finTemprano: fn(c?.earlyFinish ?? x.earlyFinish, c?.earlyStart ?? x.earlyStart),
+      inicioTardio: ini(c?.lateStart ?? x.lateStart),
+      finTardio: fn(c?.lateFinish ?? x.lateFinish, c?.lateStart ?? x.lateStart),
       holguraTotal: c?.totalFloat ?? x.totalFloat ?? 0,
       holguraLibre: c?.freeFloat ?? x.freeFloat ?? 0,
       critica: c?.isCritical ?? x.isCritical ?? false,
