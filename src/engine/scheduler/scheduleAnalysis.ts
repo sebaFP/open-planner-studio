@@ -49,6 +49,8 @@ export interface ScheduleAnalysisInput {
   /** Conventie C5: voltooide CP_Phys-activiteiten met een punt (ES = EF, LS = LF) uit de solver; hun
    *  late kant komt uit de backward pass, niet uit de actual-pin. */
   completedPhysicalPoints?: ReadonlyMap<string, Date>;
+  /** Begin van het restwerk van een lopende taak waarvan de getoonde ES de werkelijke start is (zonder A19). */
+  remainingStarts?: ReadonlyMap<string, Date>;
   /** `task` optioneel: ELAPSEDTIME ⇒ kale klok-span i.p.v. werkdag-telling, zie
    *  `CPMSolver.signedFloat`/`duration.ts`'s `signedElapsedSpan`. */
   signedFloat: (a: Date, b: Date, eng: CalendarEngine, task?: Task) => number;
@@ -124,9 +126,16 @@ export function computeScheduleResults(input: ScheduleAnalysisInput): CPMResult 
     // werkdagen (§3.4). Nul blijft nul in beide maten (geen werktijd ertussen), dus de driving-markering
     // verandert niet.
     const predTask = tasks.get(seq.predecessorId);
-    const relMinutes = succCal.workMinutesBetween(reqStart, succEarly.es);
+    // Taak buiten volgorde (OPS, MS Project): de opvolger is al gestart vóór de relatiegrens, dus haar
+    // vroege start (de werkelijke start) ligt vóór `reqStart` en gaf een negatieve vrije speling aan de
+    // voorganger die er niet is. Retained logic plant alleen het restwerk, en dat begint op `remStart`
+    // (statusdatum of voorgangerdruk): de relatie meet tegen dat begin. Ligt de start niet voor de grens,
+    // dan verandert er niets (ook de driving-markering van een gewone lopende opvolger niet).
+    const remStart = input.remainingStarts?.get(seq.successorId);
+    const succStart = remStart && succEarly.es < reqStart && remStart > succEarly.es ? remStart : succEarly.es;
+    const relMinutes = succCal.workMinutesBetween(reqStart, succStart);
     const relFloat = predTask && countsInWorkdays(predTask)
-      ? succCal.measuredWorkdaysBetween(reqStart, succEarly.es)
+      ? succCal.measuredWorkdaysBetween(reqStart, succStart)
       : relMinutes / (succCal.hoursPerDay * 60);
     sequenceFreeFloat[seq.id] = relFloat;
     sequenceFreeFloatMinutes[seq.id] = relMinutes;

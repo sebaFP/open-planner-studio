@@ -454,6 +454,10 @@ export class CPMSolver {
   private completedOutOfSequenceRelation: Map<string, { at: Date; eng: CalendarEngine }> = new Map();
   /** Conventie C5: het ene punt (ES = EF) van een voltooide CP_Phys-activiteit, forward bepaald. */
   private completedPhysicalPoints: Map<string, Date> = new Map();
+  /** Begin van het RESTWERK van een lopende taak (`remStart`), alleen bij taken waarvan de getoonde ES de
+   *  werkelijke start blijft (zonder A19). De relatie-vrije-speling meet daartegen als de relatie buiten
+   *  volgorde ligt (de werkelijke start vóór de relatiegrens van de voorganger). */
+  private remainingStarts: Map<string, Date> = new Map();
   // Relaties waarvan de lead in de forward-pass door de projectstart-vloer is afgekapt.
   private truncatedLeadIds: string[] = [];
   // Taken met een harde MSO/MFO-pin waarvan de voorganger-druk (`rawMax`) later
@@ -1674,6 +1678,7 @@ export class CPMSolver {
     this.completedOutOfSequenceEs.clear();
     this.completedOutOfSequenceRelation.clear();
     this.completedPhysicalPoints.clear();
+    this.remainingStarts.clear();
     this.truncatedLeadIds = [];
     this.hardPinViolatedIds = [];
     this.hammockNoFinishDriverIds = [];
@@ -1832,6 +1837,7 @@ export class CPMSolver {
           this.completedOutOfSequenceEs.delete(id);
           this.completedOutOfSequenceRelation.delete(id);
           this.completedPhysicalPoints.delete(id);
+          this.remainingStarts.delete(id);
           for (const seq of this.predecessors.get(id) ?? []) this.seqConstraint.delete(seq.id);
           this.forwardPass([id], results, projectStart);
           // Ook bij gelijke ES/EF doorgeven: een voltooid P6-venster kan veranderen zonder dat de
@@ -1884,6 +1890,7 @@ export class CPMSolver {
       backwardFloatTrace: this.backwardFloatTrace,
       completedOutOfSequenceEs: this.completedOutOfSequenceEs,
       completedPhysicalPoints: this.completedPhysicalPoints,
+      remainingStarts: this.remainingStarts,
     });
     // Zachte waarschuwing: alleen bij een echt onwerkbaar venster het veld zetten (anders afwezig).
     // `Set`-dedupe: de voortgangstak kan per taak TWEE checked-aanroepen doen (het
@@ -2752,6 +2759,7 @@ export class CPMSolver {
             this.options.schedulingOptions?.p6UseRemainingStartForProgress === true
             ? remStart
             : actualES;
+          if (this.options.schedulingOptions?.p6UseRemainingStartForProgress !== true) this.remainingStarts.set(taskId, remStart);
           results.set(taskId, { es: displayedEarlyStart, ef });
           continue;
         }
@@ -4197,7 +4205,17 @@ export class CPMSolver {
       // of MSP telt als urenmaat. Met de wacht kreeg A (0,5 d, FS naar B) een late finish op de vorige
       // werkdag en negatieve speling.
 
-      const computedLateStart = useP6RemainingProgress
+      // Een lopende taak zonder A19 (OPS, MS Project): de voorwaartse pass pint haar ES op de werkelijke
+      // start en plant alleen het RESTWERK (`remStart` + rest). De late start die de voorgangers van haar
+      // eisen hoort dan ook de start van dat restwerk te zijn (LF − rest), niet LF − de volle duur: de
+      // volle duur vanaf de late finish laat een voorganger die nog loopt tegen een start aanlopen die in
+      // het verleden ligt, en geeft die voorganger een valse negatieve speling (taak buiten volgorde).
+      // P6 (A19) heeft zijn eigen tak hierboven; een taak zonder voortgang rekent zoals altijd.
+      const useRemainingLateStart = !useP6RemainingProgress
+        && !task.isSummary && !task.isHammock && !isZeroDurationMilestone(task)
+        && this.options.schedulingOptions?.p6UseRemainingStartForProgress !== true
+        && isPinnedInProgress(task.time);
+      const computedLateStart = useP6RemainingProgress || useRemainingLateStart
         ? this.subRemainingDuration(predCal, lateFinish, task)
         : this.subDuration(predCal, lateFinish, task, earlyDates.get(taskId)?.es ?? null);
       // Bij P6-voortgang is een geregistreerde actual start ook de getoonde LS; LF blijft uit het
@@ -4221,7 +4239,7 @@ export class CPMSolver {
 
       this.recordBackwardFloatTrace(taskId, {
         lateFinishSource,
-        lateStartSource: useP6RemainingProgress ? 'subRemainingDuration' : 'subDuration',
+        lateStartSource: useP6RemainingProgress || useRemainingLateStart ? 'subRemainingDuration' : 'subDuration',
       });
       results.set(taskId, { ls: lateStart, lf: lateFinish });
     }
