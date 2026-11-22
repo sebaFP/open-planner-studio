@@ -11,7 +11,7 @@ import { CalendarEngine } from './CalendarEngine';
 import { taskCountsInWorkdays } from './conventions/durationMeasure';
 import { durationMinutesOf, isPinnedComplete, isPinnedInProgress, splitTotalSpanMinutes } from './duration';
 import { isDateOnly } from '@/engine/calendar/workdayRules';
-import { addCalendarDays, formatDate, parseInstant, utcDayStart } from '@/utils/dateUtils';
+import { addCalendarDays, formatDate, MS_PER_DAY, parseInstant, utcDayIndex } from '@/utils/dateUtils';
 
 /** De aanroeper lost het profiel op. `durationUnit` is geen maatbeleid. */
 export type PlacementMeasure = 'minutes' | 'workdays';
@@ -66,6 +66,37 @@ export interface PlacementResult {
 /** Ondergrens voor een rest op de split-as (dagslotminuten); kleiner telt als op. */
 const AXIS_EPS = 1e-9;
 
+interface DayBands {
+  bands: ReadonlyArray<Readonly<{ start: number; end: number }>>;
+  /** Som van de blokken (werkminuten van de dag). */
+  minutes: number;
+}
+
+// De wandelingen hieronder lezen per dag de effectieve blokken van de kalender. Dat zijn per kalender
+// dezelfde uitkomsten bij elke kandidaat (de engine memoïseert haar bandmaterialisatie op het
+// kalender-object, aannames die hier gelden), dus één keer per (engine, dag) rekenen in plaats van bij
+// elke wandeling een verse kopie te maken en op te tellen. Gekoppeld aan de engine, niet aan de module.
+const dayBandsCache = new WeakMap<CalendarEngine, Map<number, DayBands>>();
+function dayBandsOf(engine: CalendarEngine, dayMs: number): DayBands {
+  let perEngine = dayBandsCache.get(engine);
+  if (!perEngine) { perEngine = new Map(); dayBandsCache.set(engine, perEngine); }
+  let hit = perEngine.get(dayMs);
+  if (!hit) {
+    const bands = engine.effectiveBandsOn(new Date(dayMs));
+    hit = { bands, minutes: bands.reduce((sum, b) => sum + b.end - b.start, 0) };
+    perEngine.set(dayMs, hit);
+  }
+  return hit;
+}
+
+// ISO-datum van een UTC-dagbegin (ms): één keer opgemaakt per dag voor de hele module.
+const isoByDay = new Map<number, string>();
+function isoOfDayMs(dayMs: number): string {
+  let iso = isoByDay.get(dayMs);
+  if (iso === undefined) { iso = formatDate(new Date(dayMs)); isoByDay.set(dayMs, iso); }
+  return iso;
+}
+
 /**
  * Eén wandeling voor een concrete plaatsing: effectieve blokken, deeldagen en splits.
  * Een expliciet einde is exclusief. Bij een kandidaat stopt de wandeling zodra haar hoeveelheid
@@ -80,6 +111,78 @@ const AXIS_EPS = 1e-9;
  *    splitsbewerking de as van een dagtaak (het dagslotcontract).
  */
 export function workPlacement(engine: CalendarEngine, placement: WorkPlacement): PlacementResult {
+  return runPlacement(engine, placement);
+}
+
+/** De werkdagen van een plaatsing met hun `share`, zonder de `ranges` en de rest van `PlacementResult`:
+ *  genoeg om de belasting van een kandidaat te toetsen. `dayMs[i]` is UTC-middernacht van `isos[i]`. */
+export interface ShareProfile {
+  readonly dayMs: readonly number[];
+  readonly isos: readonly string[];
+  readonly shares: readonly number[];
+}
+
+// Per engine, per (maat, duur): startmoment → profiel. Een plaatsing zonder gaten is een zuivere functie
+// van (engine, start, maat, duur); de nivelleerder vraagt hem voor elke kandidaat van elke taak, en
+// taken met dezelfde kalender en duur lopen dezelfde kandidaten af. De grens houdt het geheugen
+// begrensd; daarboven wordt nog steeds correct berekend, alleen niet meer bewaard.
+const PROFILE_CACHE_LIMIT = 400_000;
+const profileCache = new WeakMap<CalendarEngine, { size: number; byShape: Map<string, Map<number, ShareProfile>> }>();
+
+/**
+ * De werkdagen met hun deel van een plaatsing: dezelfde dagen en dezelfde `share` als `workPlacement` in
+ * `PlacementDay.iso`/`PlacementDay.share` zet (dezelfde wandeling, dezelfde optelvolgorde); alleen de
+ * dagen van de hoofdwandeling, zonder de rest na het einde van de as (`rest`: `share` 0). Plaatsingen
+ * zonder gaten (met een duur) worden per engine bewaard. Voor de nivelleerder, die een kandidaat bij de
+ * eerste botsende dag kan afwijzen zonder de `ranges` te bouwen.
+ */
+export function placementShareProfile(engine: CalendarEngine, placement: WorkPlacement): ShareProfile {
+  const shape = shareProfileCache(engine, placement);
+  const startMs = placement.start.getTime();
+  if (shape) {
+    const hit = shape.get(startMs);
+    if (hit) return hit;
+  }
+  const dayMs: number[] = [];
+  const isos: string[] = [];
+  const shares: number[] = [];
+  runPlacement(engine, placement, (ms, share) => {
+    dayMs.push(ms);
+    isos.push(isoOfDayMs(ms));
+    shares.push(share);
+    return true;
+  });
+  const profile: ShareProfile = { dayMs, isos, shares };
+  if (shape) {
+    const entry = profileCache.get(engine)!;
+    if (entry.size < PROFILE_CACHE_LIMIT) {
+      shape.set(startMs, profile);
+      entry.size++;
+    }
+  }
+  return profile;
+}
+
+/** De bewaarplaats (startmoment → profiel) voor plaatsingen van deze vorm (maat en duur) op `engine`, of
+ *  `null` als de plaatsing niet bewaard wordt (gaten, een einde in plaats van een duur, een ongeldige
+ *  start). Voor de aanroeper die per kandidaat eerst wil kijken of het profiel er al is, zonder er elke
+ *  keer een plaatsingsobject voor te bouwen. */
+export function shareProfileCache(engine: CalendarEngine, placement: WorkPlacement): Map<number, ShareProfile> | null {
+  if (placement.duration === undefined || (placement.gaps !== undefined && placement.gaps.length > 0)
+    || !Number.isFinite(placement.start.getTime())) return null;
+  let entry = profileCache.get(engine);
+  if (!entry) { entry = { size: 0, byShape: new Map() }; profileCache.set(engine, entry); }
+  const key = `${placement.measure}|${placement.duration}`;
+  let shape = entry.byShape.get(key);
+  if (!shape) { shape = new Map(); entry.byShape.set(key, shape); }
+  return shape;
+}
+
+function runPlacement(
+  engine: CalendarEngine,
+  placement: WorkPlacement,
+  visit?: (dayMs: number, share: number) => boolean,
+): PlacementResult {
   const { start, measure } = placement;
   const endMs = placement.finish?.getTime() ?? Infinity;
   const remaining = placement.duration ?? Infinity;
@@ -96,7 +199,7 @@ export function workPlacement(engine: CalendarEngine, placement: WorkPlacement):
     const spanEnd = placement.duration !== undefined
       ? engine.addMeasuredWorkdays(start, measuredSpanDays(placement.duration, gaps, engine)).getTime()
       : undefined;
-    return measuredWorkdayWalk(engine, start, Math.min(endMs, spanEnd ?? Infinity), remaining, gaps, spanEnd);
+    return measuredWorkdayWalk(engine, start, Math.min(endMs, spanEnd ?? Infinity), remaining, gaps, spanEnd, visit);
   }
   // De urenmaat wandelt in hele ms, met dezelfde omzetting als de kalenderwandeling (`CalendarEngine.walkMs`).
   // Bij een duur ligt het einde op de split-as vast zoals bij de solver (`addDurationChecked`): het werk plus
@@ -116,19 +219,20 @@ export function workPlacement(engine: CalendarEngine, placement: WorkPlacement):
   let axisMs = 0;
   let finish = start;
   // De dag van de laatste stap op de as (werk of gat): daar hoort een rest die na een gat overblijft.
-  let lastStepDay: Date | null = null;
+  let lastStepDay: number | null = null;
   let lastStepDayMinutes = 0;
   const denominator = engine.hoursPerDay * 60;
   // Ook de staart van een nachtblok van een eerdere dag kan de start bevatten.
-  let day = addCalendarDays(utcDayStart(start), -2);
-  for (let scanned = 0; scanned < 200_000 && day.getTime() < endMs && axisMs < axisEndMs; scanned++) {
-    const bands = engine.effectiveBandsOn(day);
-    const dayMinutes = bands.reduce((sum, b) => sum + b.end - b.start, 0);
+  let dayMs = (utcDayIndex(start.getTime()) - 2) * MS_PER_DAY;
+  for (let scanned = 0; scanned < 200_000 && dayMs < endMs && axisMs < axisEndMs; scanned++) {
+    const { bands, minutes: dayMinutes } = dayBandsOf(engine, dayMs);
     const ranges: PlacementRange[] = [];
     let dayResidue = 0;
+    let rangeCount = 0;
+    let dayShare = 0;
     for (const band of bands) {
-      let cursor = Math.max(start.getTime(), day.getTime() + band.start * 60_000);
-      const end = Math.min(endMs, day.getTime() + band.end * 60_000);
+      let cursor = Math.max(start.getTime(), dayMs + band.start * 60_000);
+      const end = Math.min(endMs, dayMs + band.end * 60_000);
       while (cursor < end && axisMs < axisEndMs) {
         // Overlappende en aaneensluitende gaten delen dezelfde cumulatieve as.
         while (gapIndex < gaps.length && toMs(gaps[gapIndex].afterMinutes + gaps[gapIndex].gapMinutes) <= axisMs) gapIndex++;
@@ -142,29 +246,36 @@ export function workPlacement(engine: CalendarEngine, placement: WorkPlacement):
           const minutes = axisMs + step >= axisEndMs ? rest : Math.min(time, rest);
           rest -= minutes;
           if (minutes > time) dayResidue += minutes - time;
-          ranges.push({ afterMinutes: axisMs / 60_000, axisMinutes: time, minutes, share: Math.min(minutes, time) / denominator });
+          const share = Math.min(minutes, time) / denominator;
+          rangeCount++;
+          dayShare += share;
+          if (!visit) ranges.push({ afterMinutes: axisMs / 60_000, axisMinutes: time, minutes, share });
         }
         axisMs += step;
         cursor += step;
         finish = new Date(cursor);
-        lastStepDay = day;
+        lastStepDay = dayMs;
         lastStepDayMinutes = dayMinutes;
       }
     }
-    if (ranges.length > 0) days.push({
-      iso: formatDate(day), ranges, dayAxisMinutes: dayMinutes,
+    if (visit) {
+      if (rangeCount > 0 && !visit(dayMs, dayShare)) return { days, finish };
+    } else if (ranges.length > 0) days.push({
+      iso: isoOfDayMs(dayMs), ranges, dayAxisMinutes: dayMinutes,
       minutes: ranges.reduce((sum, r) => sum + r.minutes, 0),
       share: ranges.reduce((sum, r) => sum + r.share, 0),
       ...(dayResidue > 0 ? { residueMinutes: dayResidue } : {}),
     });
-    day = addCalendarDays(day, 1);
+    dayMs += MS_PER_DAY;
   }
+  // Alleen scannen: de rest hieronder heeft `share` 0 en komt niet langs `visit`.
+  if (visit) return { days, finish };
   // Eindigt de as in een gat (de werkrest erna is korter dan een halve ms), dan is die rest werk op de dag van
   // het einde: een stuk zonder lengte op de as en zonder capaciteit, aan het eind van de as. Zo loopt geen stuk
   // het gat in, en valt een contourperiode na het gat op de dag van het einde.
   if (rest > 0 && Number.isFinite(rest) && lastStepDay) {
     const residue: PlacementRange = { afterMinutes: axisMs / 60_000, axisMinutes: 0, minutes: rest, share: 0 };
-    const iso = formatDate(lastStepDay);
+    const iso = isoOfDayMs(lastStepDay);
     const tail = days[days.length - 1];
     if (tail?.iso === iso) {
       tail.ranges.push(residue);
@@ -283,6 +394,7 @@ function measuredWorkdayWalk(
   durationDays: number,
   gaps: readonly TaskSplitGap[],
   spanEnd: number | undefined,
+  visit?: (dayMs: number, share: number) => boolean,
 ): PlacementResult {
   const mpd = Math.max(1, engine.hoursPerDay * 60);
   const startMs = start.getTime();
@@ -292,12 +404,12 @@ function measuredWorkdayWalk(
   let axis = 0;
   let finish = start;
   // Ook de staart van een nachtblok van een eerdere dag kan de start bevatten.
-  let day = addCalendarDays(utcDayStart(start), -2);
-  for (let scanned = 0; scanned < 200_000 && day.getTime() < endMs && remaining > AXIS_EPS; scanned++) {
-    const dayMs = day.getTime();
-    const bands = engine.effectiveBandsOn(day);
-    const dayMinutes = bands.reduce((sum, b) => sum + b.end - b.start, 0);
+  let dayMs = (utcDayIndex(startMs) - 2) * MS_PER_DAY;
+  for (let scanned = 0; scanned < 200_000 && dayMs < endMs && remaining > AXIS_EPS; scanned++) {
+    const { bands, minutes: dayMinutes } = dayBandsOf(engine, dayMs);
     const ranges: PlacementRange[] = [];
+    let rangeCount = 0;
+    let dayShare = 0;
     // Werkminuten van deze dag vóór de start en vóór het (exclusieve) einde.
     let at = workOffset(bands, dayMs, startMs);
     const to = workOffset(bands, dayMs, endMs);
@@ -314,24 +426,31 @@ function measuredWorkdayWalk(
       if (!(step > AXIS_EPS)) break;
       const next = at + step / scale;
       if (!inGap) {
-        ranges.push({
-          afterMinutes: axis, axisMinutes: step, share: step / mpd,
-          minutes: Math.round(next) - Math.round(at),
-        });
+        rangeCount++;
+        dayShare += step / mpd;
+        if (!visit) {
+          ranges.push({
+            afterMinutes: axis, axisMinutes: step, share: step / mpd,
+            minutes: Math.round(next) - Math.round(at),
+          });
+        }
         remaining -= step;
       }
       // Een gatgrens bereikt: de as staat precies op die grens, zonder drift uit de omrekening.
       axis = step === toBoundary ? boundary : axis + step;
       at = next;
-      finish = momentAtOffset(engine, bands, dayMs, Math.round(at));
+      if (!visit) finish = momentAtOffset(engine, bands, dayMs, Math.round(at));
     }
-    if (ranges.length > 0) days.push({
-      iso: formatDate(day), ranges, dayAxisMinutes: mpd,
+    if (visit) {
+      if (rangeCount > 0 && !visit(dayMs, dayShare)) return { days, finish };
+    } else if (ranges.length > 0) days.push({
+      iso: isoOfDayMs(dayMs), ranges, dayAxisMinutes: mpd,
       minutes: ranges.reduce((sum, r) => sum + r.minutes, 0),
       share: ranges.reduce((sum, r) => sum + r.share, 0),
     });
-    day = addCalendarDays(day, 1);
+    dayMs += MS_PER_DAY;
   }
+  if (visit) return { days, finish };
   // Rondt de wandeling op een halve minuut net anders af dan de lopers, dan geldt het einde van de solver.
   if (spanEnd !== undefined && days.length > 0) finish = new Date(spanEnd);
   return { days, finish };

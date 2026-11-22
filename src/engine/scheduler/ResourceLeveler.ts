@@ -53,11 +53,14 @@ import { CPMSolver, type CPMResult, type CPMOptions } from './CPMSolver';
 import {
   assignmentLoadOnPlacement, contourLookup, dayslotLoad, maxUnitsOn, taskLoadPlacement,
 } from './ResourceLoad';
-import { hasManualPlacement, placementFollowsSpan, type PlacementResult } from './workPlacement';
+import {
+  hasManualPlacement, placementFollowsSpan, placementShareProfile, shareProfileCache, taskWorkPlacement, type PlacementResult,
+  type ShareProfile, type WorkPlacement,
+} from './workPlacement';
 import { createTaskEngineCache } from './taskEngineCache';
 import { isPinnedComplete, isPinnedInProgress } from './duration';
 import { workdayDateOfInstant } from '@/engine/calendar/workdayRules';
-import { parseDate, parseInstant, formatDate, formatInstant, addCalendarDays, diffCalendarDays } from '@/utils/dateUtils';
+import { parseDate, parseInstant, formatDate, formatInstant, addCalendarDays, diffCalendarDays, MS_PER_DAY } from '@/utils/dateUtils';
 import { calendarForEngine } from '@/utils/effectiveWorkTime';
 import { isLeafTask, isSummaryTask } from '@/utils/taskHierarchy';
 import { maxOf } from '@/utils/collections';
@@ -344,6 +347,25 @@ function levelPass(
    *  - Kalendertijd: per kalenderdag; `minutes(k)` = k × 1440.
    *  - Dagmodus: per werkdag (`nextWorkDayAfter`), zonder minuten.
    */
+  const axisSteps = new WeakMap<CalendarEngine, Map<number, Map<number, { nextMs: number; skipMs: number; dayMinutes: number }>>>();
+  const axisStep = (eng: CalendarEngine, prevMs: number, skipMs: number) => {
+    let bySkip = axisSteps.get(eng);
+    if (!bySkip) { bySkip = new Map(); axisSteps.set(eng, bySkip); }
+    let byPrev = bySkip.get(skipMs);
+    if (!byPrev) { byPrev = new Map(); bySkip.set(skipMs, byPrev); }
+    let step = byPrev.get(prevMs);
+    if (!step) {
+      const skip = new Date(skipMs);
+      const dayMinutes = eng.effectiveBandsOn(skip).reduce((acc, b) => acc + b.end - b.start, 0);
+      step = {
+        dayMinutes,
+        skipMs: eng.nextWorkDayAfter(skip).getTime(),
+        nextMs: eng.nextWorkInstant(eng.addWorkingMinutesSigned(new Date(prevMs), dayMinutes)).getTime(),
+      };
+      byPrev.set(prevMs, step);
+    }
+    return step;
+  };
   const candidateAxis = (task: Task, pf: Date): { at: (k: number) => Date; minutes: (k: number) => number } => {
     const eng = engineForTask(task);
     const elapsed = task.time.durationType === 'ELAPSEDTIME';
@@ -361,15 +383,17 @@ function levelPass(
           starts.push(eng.nextWorkDayAfter(prev));
           sums.push(Number.NaN);
         } else {
-          const day = eng.effectiveBandsOn(skip).reduce((acc, b) => acc + b.end - b.start, 0);
-          skip = eng.nextWorkDayAfter(skip);
-          sums.push(sums[sums.length - 1] + day);
           // Stapsgewijs vanaf de vorige kandidaat: alleen de nieuw overgeslagen werkdag. De bandwandeling
           // is optelbaar (de vorige kandidaat ligt `sums[k-1]` werkminuten na `first`, een blokeinde is
           // al naar het volgende blokbegin gezet), dus dit is hetzelfde moment als `first` + `sums[k]`.
           // Elke kandidaat opnieuw vanaf `first` wandelen kostte k werkdagen per kandidaat: kwadratisch per
           // taak, derde macht over een rij concurrerende taken (aanval a12 na #600).
-          starts.push(eng.nextWorkInstant(eng.addWorkingMinutesSigned(prev, day)));
+          // De stap is een zuivere functie van (vorige kandidaat, overgeslagen werkdag) op de engine, en
+          // taken met dezelfde kalender lopen dezelfde reeks af: één keer rekenen per engine (`axisStep`).
+          const step = axisStep(eng, prev.getTime(), skip.getTime());
+          skip = new Date(step.skipMs);
+          sums.push(sums[sums.length - 1] + step.dayMinutes);
+          starts.push(new Date(step.nextMs));
         }
       }
     };
@@ -379,19 +403,45 @@ function levelPass(
     };
   };
 
+  // De capaciteit van een resource op een dag is een zuivere functie van resource, kalender en dag, en
+  // verandert niet binnen een nivellering: één keer rekenen per (resource, dag) in plaats van elke
+  // kandidaat opnieuw (`parseDate` + kalendervraag + `maxUnitsOn` per vraagdag per kandidaat).
+  const capacityCache = new Map<string, Map<string, number>>();
   const capacityOf = (resId: string, iso: string): number => {
+    let perRes = capacityCache.get(resId);
+    if (!perRes) { perRes = new Map(); capacityCache.set(resId, perRes); }
+    const hit = perRes.get(iso);
+    if (hit !== undefined) return hit;
     const r = resById.get(resId);
     const eng = engineByRes.get(resId);
-    if (!r || !eng) return 0;
-    return eng.isWorkDay(parseDate(iso)) ? maxUnitsOn(r, iso) : 0;
+    const value = !r || !eng ? 0 : isResWorkDay(resId, iso) ? maxUnitsOn(r, iso) : 0;
+    perRes.set(iso, value);
+    return value;
   };
   /** Werkt de resource op die dag volgens ZIJN kalender? Puur de kalender-uitlijning, ONGEACHT hoeveel
    *  eenheden hij die dag te bieden heeft (met een restprofiel is 0 de normale waarde van een volle dag, en ook zonder restprofiel is `maxUnits: 0` een capaciteits- en
    *  geen kalenderprobleem). `capacityOf` hierboven blijft de gecombineerde waarde — die is voor
    *  `fits` precies goed. */
+  const resWorkDayCache = new Map<string, Map<string, boolean>>();
   const isResWorkDay = (resId: string, iso: string): boolean => {
-    const eng = engineByRes.get(resId);
-    return !!eng && eng.isWorkDay(parseDate(iso));
+    let perRes = resWorkDayCache.get(resId);
+    if (!perRes) { perRes = new Map(); resWorkDayCache.set(resId, perRes); }
+    let hit = perRes.get(iso);
+    if (hit === undefined) {
+      const eng = engineByRes.get(resId);
+      hit = !!eng && eng.isWorkDay(parseDate(iso));
+      perRes.set(iso, hit);
+    }
+    return hit;
+  };
+  // Dagtabellen per resource op dagnummer (dagen sinds 1970-01-01): dezelfde waarden als `capacityOf` en
+  // `isResWorkDay`, voor de binnenste lus van de kandidaat-scan, waar een zoekactie op ISO-tekst te duur is.
+  const capacityByDay = new Map<string, Array<number | undefined>>();
+  const workDayByDay = new Map<string, Array<number | undefined>>();
+  const dayTable = (tables: Map<string, Array<number | undefined>>, resId: string): Array<number | undefined> => {
+    let table = tables.get(resId);
+    if (!table) { table = []; tables.set(resId, table); }
+    return table;
   };
   // Maximaal beschikbare eenheden op een wérkdag van de resource (vlakke maxUnits of de hoogste
   // availabilityStep) — basis voor de intrinsieke-overvraag-detectie.
@@ -1106,7 +1156,21 @@ function levelPass(
     // opraakte (een rekengrens). Alleen de horizon-tak hieronder — én de `HARD_SCAN_CAP`-vangrail ná
     // de lus — zetten hem op `true`.
     let horizonExhausted = false;
+    // Snelle afwijzing (`rejectsOnProject`): een kandidaat die op een dag de projectcapaciteit
+    // overschrijdt valt af zonder dat zijn hele plaatsing wordt opgebouwd. Alleen AFWIJZEN gaat hier;
+    // een kandidaat die niet snel afvalt loopt het gewone pad (`demandAt` + `fits`), dat beslist.
+    const rejectsOnProject = fastProjectRejection(task);
     while (guard++ < HARD_SCAN_CAP) {
+      if (rejectsOnProject !== null && rejectsOnProject.test(cand, !calendarFeasibleSeen)) {
+        poolBlockedOnly = false; // zoals `fits`: de PROJECTtoets faalde
+        if (rejectsOnProject.calendarOk) calendarFeasibleSeen = true;
+        const nextRejected = axis.at(k + 1);
+        if (limit && nextRejected > limit) break;
+        if (guard >= scanLimit && !(horizonDate && nextRejected <= horizonDate)) { horizonExhausted = true; break; }
+        cand = nextRejected;
+        k++;
+        continue;
+      }
       const { days: occ, byRes } = demandAt(task, cand);
       if (!calendarFeasibleSeen && calendarOk(byRes, occ)) calendarFeasibleSeen = true;
       // Een LEEG kandidaatvenster (`occ.length === 0`) telt NIET als passend.
@@ -1177,6 +1241,75 @@ function levelPass(
       unresolved: [...new Set(conflicts)].sort(),
       reason: reasonFor(byRes, calendarFeasibleSeen, ceilingSet, ceilingUnreachable, horizonExhausted),
     };
+  }
+
+  /** Snelle projecttoets voor de kandidaat-scan van `findSlot`: `test(cand)` is `true` als de plaatsing
+   *  van de kandidaat op minstens één dag de projectcapaciteit overschrijdt (dezelfde toets als het
+   *  eerste deel van `fits`), bepaald door de plaatsing dag voor dag te lopen en bij de eerste botsing
+   *  te stoppen. Dezelfde wandeling (`scanPlacementShares`) en dezelfde optelvolgorde als
+   *  `computeDemand`, dus dezelfde vraag per dag. Met `needCalendar` loopt de scan na een botsing door
+   *  om ook `calendarOk` te bepalen (`calendarOk` na afloop: valt elke vraagdag op een resource-werkdag?),
+   *  zodat `calendarFeasibleSeen` niet per kandidaat een volledige plaatsing hoeft te kosten.
+   *  `null` ⇒ deze taak komt er niet voor in aanmerking (dagmodus, een spanne-gebonden plaatsing, een
+   *  contour/curve/opgeslagen werk, geen toewijzing): dan loopt elke kandidaat het gewone pad. Een
+   *  kandidaat zonder botsing geeft `false`; de aanroeper beslist dan met `demandAt` + `fits`. */
+  function fastProjectRejection(task: Task): { test: (cand: Date, needCalendar: boolean) => boolean; calendarOk: boolean } | null {
+    const engine = engineForTask(task);
+    if (!engine.isHourMode || !engine.hasWorkingDays() || placementFollowsSpan(task)) return null;
+    const list = selectedAssignmentsByTask.get(task.id) ?? [];
+    if (list.length === 0) return null;
+    const groups = new Map<string, number[]>();
+    for (const a of list) {
+      const contour = contourOf(task, a);
+      if ((contour && contour.periods.length > 0) || a.curveValues || a.remainingWorkMinutes !== undefined
+        || (a.curve && a.curve !== 'UNIFORM') || !Number.isFinite(a.unitsPerDay)) return null;
+      const units = groups.get(a.resourceId);
+      if (units) units.push(a.unitsPerDay); else groups.set(a.resourceId, [a.unitsPerDay]);
+    }
+    // Per resource de eenheden per toewijzing plus zijn dagtabellen (op dagnummer: capaciteit en werkdag).
+    const perResource = [...groups].map(([resId, units]) => ({
+      resId, units, capacity: dayTable(capacityByDay, resId), works: dayTable(workDayByDay, resId),
+    }));
+    let base: WorkPlacement | null | undefined;
+    let shape: Map<number, ShareProfile> | null | undefined;
+    const state = { calendarOk: false, test: (_cand: Date, _needCalendar: boolean): boolean => false };
+    state.test = (cand, needCalendar) => {
+      state.calendarOk = true;
+      if (!Number.isFinite(cand.getTime())) return false;
+      if (base === undefined) base = taskWorkPlacement(task, engine, placementOptions, cand);
+      if (base === null) return false;
+      if (shape === undefined) shape = shareProfileCache(engine, base);
+      const { dayMs, isos, shares } = shape?.get(cand.getTime())
+        ?? placementShareProfile(engine, { ...base, start: cand } as WorkPlacement);
+      let conflict = false;
+      for (let d = 0; d < shares.length; d++) {
+        const share = shares[d];
+        const iso = isos[d];
+        const dayNumber = dayMs[d] / MS_PER_DAY;
+        for (let g = 0; g < perResource.length; g++) {
+          const { resId, units, capacity, works } = perResource[g];
+          // Zelfde optelvolgorde als `computeDemand`: (u_n + (… + (u_2 + u_1))).
+          let amount = share * units[0];
+          for (let i = 1; i < units.length; i++) amount = share * units[i] + amount;
+          if (amount <= 0) continue;
+          if (needCalendar && state.calendarOk) {
+            let works1 = works[dayNumber];
+            if (works1 === undefined) { works1 = isResWorkDay(resId, iso) ? 1 : 0; works[dayNumber] = works1; }
+            if (works1 === 0) state.calendarOk = false;
+          }
+          if (!conflict) {
+            let cap = capacity[dayNumber];
+            if (cap === undefined) { cap = capacityOf(resId, iso); capacity[dayNumber] = cap; }
+            if (exceedsCapacity(bookedOn(resId, iso) + amount, cap)) conflict = true;
+          }
+        }
+        // Een botsing is genoeg om af te wijzen; verder lopen alleen zolang de kalendertoets nog uitstaat
+        // (`calendarOk` kan alleen nog van waar naar onwaar).
+        if (conflict && (!needCalendar || !state.calendarOk)) break;
+      }
+      return conflict;
+    };
+    return state;
   }
 
   function intrinsicOverrunFor(byRes: Map<string, number[]>): LevelingIntrinsicOverrun | undefined {
