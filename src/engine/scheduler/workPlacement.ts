@@ -77,7 +77,14 @@ interface DayBands {
 // kalender-object, aannames die hier gelden), dus één keer per (engine, dag) rekenen in plaats van bij
 // elke wandeling een verse kopie te maken en op te tellen. Gekoppeld aan de engine, niet aan de module.
 const dayBandsCache = new WeakMap<CalendarEngine, Map<number, DayBands>>();
-function dayBandsOf(engine: CalendarEngine, dayMs: number): DayBands {
+function dayBandsOf(engine: CalendarEngine, dayMs: number, cached: boolean): DayBands {
+  // Alleen de profielbouw (`visit`) gebruikt de bewaarde blokken; de gewone plaatsing leest de kalender
+  // zoals altijd, zodat het kalenderwerk van histogram en belasting meetbaar met de taken meeschaalt
+  // (`check-resource-load-reuse.ts` telt `effectiveBandsOn`).
+  if (!cached) {
+    const bands = engine.effectiveBandsOn(new Date(dayMs));
+    return { bands, minutes: bands.reduce((sum, b) => sum + b.end - b.start, 0) };
+  }
   let perEngine = dayBandsCache.get(engine);
   if (!perEngine) { perEngine = new Map(); dayBandsCache.set(engine, perEngine); }
   let hit = perEngine.get(dayMs);
@@ -240,7 +247,7 @@ function runPlacement(
   // Ook de staart van een nachtblok van een eerdere dag kan de start bevatten.
   let dayMs = (utcDayIndex(start.getTime()) - 2) * MS_PER_DAY;
   for (let scanned = 0; scanned < 200_000 && dayMs < endMs && axisMs < axisEndMs; scanned++) {
-    const { bands, minutes: dayMinutes } = dayBandsOf(engine, dayMs);
+    const { bands, minutes: dayMinutes } = dayBandsOf(engine, dayMs, visit !== undefined);
     const ranges: PlacementRange[] = [];
     let dayResidue = 0;
     let rangeCount = 0;
@@ -421,7 +428,7 @@ function measuredWorkdayWalk(
   // Ook de staart van een nachtblok van een eerdere dag kan de start bevatten.
   let dayMs = (utcDayIndex(startMs) - 2) * MS_PER_DAY;
   for (let scanned = 0; scanned < 200_000 && dayMs < endMs && remaining > AXIS_EPS; scanned++) {
-    const { bands, minutes: dayMinutes } = dayBandsOf(engine, dayMs);
+    const { bands, minutes: dayMinutes } = dayBandsOf(engine, dayMs, visit !== undefined);
     const ranges: PlacementRange[] = [];
     let rangeCount = 0;
     let dayShare = 0;
