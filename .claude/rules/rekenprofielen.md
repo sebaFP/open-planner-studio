@@ -78,7 +78,14 @@ open besluiten: `docs/superpowers/plans/2026-09-24-nivellering-etappe-onderzoek.
 **De nivelleerder zelf (`ResourceLeveler.ts`, 2026-09):** kiest de volgende taak via een heap op rang en
 herrekent de PF-voorwaartse pass (`CPMSolver.solveEarlyStarts`) alleen stroomafwaarts van een wijziging
 (globaal bij ALAP of hammock). Die cache is pure prestatie: `LEVELER_TEST_HOOKS.incremental = false` geeft
-het oude pad, en `tests/planning/check-leveler-differential.ts` pint beide paden byte-gelijk. De
+het oude pad, en `tests/planning/check-leveler-differential.ts` pint beide paden byte-gelijk. Ook de
+kandidaat-scan van `findSlot` is pure prestatie: een kandidaat die op een dag de projectcapaciteit
+overschrijdt valt snel af (`fastProjectRejection`, op een deelprofiel uit `placementShareProfile` in
+`workPlacement.ts`, per engine bewaard) zonder zijn hele plaatsing op te bouwen. Alleen AFWIJZEN gaat
+snel; elke andere kandidaat loopt het gewone pad (`demandAt` + `fits`), dat beslist. Een taak met een
+contour, curve of opgeslagen werk, een spanne-gebonden plaatsing of een dagkalender komt er niet voor
+in aanmerking. `LEVELER_TEST_HOOKS.fastScan = false` schakelt het uit en dezelfde check legt beide
+uitkomsten naast elkaar. De
 nivelleerdialoog rekent in een Web Worker (`src/engine/scheduler/levelingWorker.ts` via
 `src/services/leveling/backgroundLeveling.ts`, met `setTimeout`-terugval zonder Worker) op de invoer van
 `scheduleSlice.levelingInput`, met Stoppen; een uitkomst op verouderde store-invoer wordt niet toegepast.
