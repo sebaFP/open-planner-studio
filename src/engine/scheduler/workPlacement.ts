@@ -89,13 +89,20 @@ function dayBandsOf(engine: CalendarEngine, dayMs: number): DayBands {
   return hit;
 }
 
-// ISO-datum van een UTC-dagbegin (ms): één keer opgemaakt per dag voor de hele module.
-const isoByDay = new Map<number, string>();
-function isoOfDayMs(dayMs: number): string {
-  let iso = isoByDay.get(dayMs);
-  if (iso === undefined) { iso = formatDate(new Date(dayMs)); isoByDay.set(dayMs, iso); }
+// ISO-datum van een UTC-dagnummer: één keer opgemaakt per dag voor de hele module.
+const isoByDay: Array<string | undefined> = [];
+/** ISO-datum (`YYYY-MM-DD`) van een dagnummer (dagen sinds 1970-01-01, UTC): dezelfde tekst als
+ *  `formatDate`, maar één keer opgemaakt per dag. */
+export function isoOfDayNumber(dayNumber: number): string {
+  let iso = isoByDay[dayNumber];
+  if (iso === undefined) {
+    iso = formatDate(new Date(dayNumber * MS_PER_DAY));
+    // Een negatief of niet-geheel dagnummer (geen kalenderdag van de engine) bewaren we niet.
+    if (Number.isInteger(dayNumber) && dayNumber >= 0 && dayNumber < 1_000_000) isoByDay[dayNumber] = iso;
+  }
   return iso;
 }
+const isoOfDayMs = (dayMs: number): string => isoOfDayNumber(dayMs / MS_PER_DAY);
 
 /**
  * Eén wandeling voor een concrete plaatsing: effectieve blokken, deeldagen en splits.
@@ -115,10 +122,11 @@ export function workPlacement(engine: CalendarEngine, placement: WorkPlacement):
 }
 
 /** De werkdagen van een plaatsing met hun `share`, zonder de `ranges` en de rest van `PlacementResult`:
- *  genoeg om de belasting van een kandidaat te toetsen. `dayMs[i]` is UTC-middernacht van `isos[i]`. */
+ *  genoeg om de belasting van een kandidaat te toetsen. `days[i]` is het dagnummer (dagen sinds
+ *  1970-01-01, UTC) van de werkdag; zijn ISO-datum geeft `isoOfDayNumber`. Compact, want er worden er
+ *  veel bewaard. */
 export interface ShareProfile {
-  readonly dayMs: readonly number[];
-  readonly isos: readonly string[];
+  readonly days: readonly number[];
   readonly shares: readonly number[];
 }
 
@@ -126,8 +134,14 @@ export interface ShareProfile {
 // van (engine, start, maat, duur); de nivelleerder vraagt hem voor elke kandidaat van elke taak, en
 // taken met dezelfde kalender en duur lopen dezelfde kandidaten af. De grens houdt het geheugen
 // begrensd; daarboven wordt nog steeds correct berekend, alleen niet meer bewaard.
-const PROFILE_CACHE_LIMIT = 400_000;
-const profileCache = new WeakMap<CalendarEngine, { size: number; byShape: Map<string, Map<number, ShareProfile>> }>();
+const PROFILE_CACHE_LIMIT = 150_000;
+interface ProfileCacheEntry {
+  size: number;
+  byShape: Map<string, Map<number, ShareProfile>>;
+  /** Veel plaatsingen hebben dezelfde reeks delen (hele dagen en een restdeel): elke reeks één keer bewaard. */
+  sharesPool: Map<string, readonly number[]>;
+}
+const profileCache = new WeakMap<CalendarEngine, ProfileCacheEntry>();
 
 /**
  * De werkdagen met hun deel van een plaatsing: dezelfde dagen en dezelfde `share` als `workPlacement` in
@@ -143,24 +157,25 @@ export function placementShareProfile(engine: CalendarEngine, placement: WorkPla
     const hit = shape.get(startMs);
     if (hit) return hit;
   }
-  const dayMs: number[] = [];
-  const isos: string[] = [];
+  const days: number[] = [];
   const shares: number[] = [];
   runPlacement(engine, placement, (ms, share) => {
-    dayMs.push(ms);
-    isos.push(isoOfDayMs(ms));
+    days.push(ms / MS_PER_DAY);
     shares.push(share);
-    return true;
   });
-  const profile: ShareProfile = { dayMs, isos, shares };
   if (shape) {
     const entry = profileCache.get(engine)!;
     if (entry.size < PROFILE_CACHE_LIMIT) {
+      const key = shares.join(',');
+      let pooled = entry.sharesPool.get(key);
+      if (!pooled) { pooled = shares; entry.sharesPool.set(key, pooled); }
+      const profile: ShareProfile = { days, shares: pooled };
       shape.set(startMs, profile);
       entry.size++;
+      return profile;
     }
   }
-  return profile;
+  return { days, shares };
 }
 
 /** De bewaarplaats (startmoment → profiel) voor plaatsingen van deze vorm (maat en duur) op `engine`, of
@@ -171,7 +186,7 @@ export function shareProfileCache(engine: CalendarEngine, placement: WorkPlaceme
   if (placement.duration === undefined || (placement.gaps !== undefined && placement.gaps.length > 0)
     || !Number.isFinite(placement.start.getTime())) return null;
   let entry = profileCache.get(engine);
-  if (!entry) { entry = { size: 0, byShape: new Map() }; profileCache.set(engine, entry); }
+  if (!entry) { entry = { size: 0, byShape: new Map(), sharesPool: new Map() }; profileCache.set(engine, entry); }
   const key = `${placement.measure}|${placement.duration}`;
   let shape = entry.byShape.get(key);
   if (!shape) { shape = new Map(); entry.byShape.set(key, shape); }
@@ -181,7 +196,7 @@ export function shareProfileCache(engine: CalendarEngine, placement: WorkPlaceme
 function runPlacement(
   engine: CalendarEngine,
   placement: WorkPlacement,
-  visit?: (dayMs: number, share: number) => boolean,
+  visit?: (dayMs: number, share: number) => void,
 ): PlacementResult {
   const { start, measure } = placement;
   const endMs = placement.finish?.getTime() ?? Infinity;
@@ -259,7 +274,7 @@ function runPlacement(
       }
     }
     if (visit) {
-      if (rangeCount > 0 && !visit(dayMs, dayShare)) return { days, finish };
+      if (rangeCount > 0) visit(dayMs, dayShare);
     } else if (ranges.length > 0) days.push({
       iso: isoOfDayMs(dayMs), ranges, dayAxisMinutes: dayMinutes,
       minutes: ranges.reduce((sum, r) => sum + r.minutes, 0),
@@ -394,7 +409,7 @@ function measuredWorkdayWalk(
   durationDays: number,
   gaps: readonly TaskSplitGap[],
   spanEnd: number | undefined,
-  visit?: (dayMs: number, share: number) => boolean,
+  visit?: (dayMs: number, share: number) => void,
 ): PlacementResult {
   const mpd = Math.max(1, engine.hoursPerDay * 60);
   const startMs = start.getTime();
@@ -442,7 +457,7 @@ function measuredWorkdayWalk(
       if (!visit) finish = momentAtOffset(engine, bands, dayMs, Math.round(at));
     }
     if (visit) {
-      if (rangeCount > 0 && !visit(dayMs, dayShare)) return { days, finish };
+      if (rangeCount > 0) visit(dayMs, dayShare);
     } else if (ranges.length > 0) days.push({
       iso: isoOfDayMs(dayMs), ranges, dayAxisMinutes: mpd,
       minutes: ranges.reduce((sum, r) => sum + r.minutes, 0),

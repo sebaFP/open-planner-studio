@@ -6,6 +6,10 @@
 // meerdere resources met afwijkende capaciteit, splitsen aan/uit, speling-begrenzing, scope en een
 // uitloopplafond.
 //
+// De snelle projectafwijzing van de kandidaat-scan (`LEVELER_TEST_HOOKS.fastScan`) wordt op dezelfde
+// projecten naast de scan zonder die afwijzing gelegd (zelfde incrementele route): de uitkomst moet
+// byte-voor-byte gelijk zijn, ook de reden en de conflictdagen van een taak zonder slot.
+//
 // Draait via run.sh (esbuild-bundel). Exit 0 = alles groen — alleen de exitcode telt.
 import { levelResources, LEVELER_TEST_HOOKS, type LevelingOptions } from '@/engine/scheduler/ResourceLeveler';
 import { solveProject } from '@/engine/scheduler/solveProject';
@@ -105,8 +109,9 @@ for (let rep = 0; rep < 300; rep++) {
   const calendars = [p.cal, SIX];
   const cpm = solveProject({ tasks: p.tasks, sequences: p.seqs, calendar: p.cal, calendars, schedulingOptions, projectStartDate: '2026-06-01' });
   if (cpm.error) continue;
-  const run = (incremental: boolean) => {
+  const run = (incremental: boolean, fastScan = incremental) => {
     LEVELER_TEST_HOOKS.incremental = incremental;
+    LEVELER_TEST_HOOKS.fastScan = fastScan;
     try {
       return JSON.stringify(levelResources(
         structuredClone(p.tasks), p.seqs, p.resources, p.assignments, p.cal, calendars, cpm, p.options,
@@ -114,13 +119,17 @@ for (let rep = 0; rep < 300; rep++) {
       ));
     } finally {
       LEVELER_TEST_HOOKS.incremental = true;
+      LEVELER_TEST_HOOKS.fastScan = true;
     }
   };
   const reference = run(false);
   const fast = run(true);
+  const fullScan = run(true, false);
   if (parityOut) parity.push({ rep, profile: baseId, input: JSON.stringify(p), reference, fast });
   checks++;
   if (reference !== fast) diffs.push(`rep ${rep}: ${reference.slice(0, 220)}\n       ≠ ${fast.slice(0, 220)}`);
+  checks++;
+  if (fullScan !== fast) diffs.push(`rep ${rep} (snelle afwijzing): ${fullScan.slice(0, 220)}\n       ≠ ${fast.slice(0, 220)}`);
 }
 checks++;
 if (withFeatures < 40) diffs.push(`te weinig projecten met ALAP/hammock om de globale tak te toetsen: ${withFeatures}`);

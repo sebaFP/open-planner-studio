@@ -54,7 +54,7 @@ import {
   assignmentLoadOnPlacement, contourLookup, dayslotLoad, maxUnitsOn, taskLoadPlacement,
 } from './ResourceLoad';
 import {
-  hasManualPlacement, placementFollowsSpan, placementShareProfile, shareProfileCache, taskWorkPlacement, type PlacementResult,
+  hasManualPlacement, isoOfDayNumber, placementFollowsSpan, placementShareProfile, shareProfileCache, taskWorkPlacement, type PlacementResult,
   type ShareProfile, type WorkPlacement,
 } from './workPlacement';
 import { createTaskEngineCache } from './taskEngineCache';
@@ -216,10 +216,11 @@ const HARD_SCAN_CAP = 200_000;
 
 /**
  * Alleen voor tests (`check-leveler-differential.ts`): `incremental: false` schakelt terug naar de
- * oude route (volledige solve per plaatsing + lineaire keuze), zodat de toets beide uitkomsten naast
- * elkaar kan leggen. Productiecode zet dit nooit om.
+ * oude route (volledige solve per plaatsing + lineaire keuze), `fastScan: false` naar de kandidaat-scan
+ * zonder snelle projectafwijzing (elke kandidaat bouwt zijn hele plaatsing op, `demandAt`), zodat de
+ * toets beide uitkomsten naast elkaar kan leggen. Productiecode zet dit nooit om.
  */
-export const LEVELER_TEST_HOOKS = { incremental: true };
+export const LEVELER_TEST_HOOKS = { incremental: true, fastScan: true };
 
 /** De volledige argumentenlijst van `levelResources`, als plain data — dezelfde invoer voor de
  *  synchrone route en de Web Worker van de nivelleer-dialoog (`services/leveling/`). */
@@ -347,13 +348,16 @@ function levelPass(
    *  - Kalendertijd: per kalenderdag; `minutes(k)` = k × 1440.
    *  - Dagmodus: per werkdag (`nextWorkDayAfter`), zonder minuten.
    */
+  // Per engine: overgeslagen werkdag (dagnummer) → vorige kandidaat (ms ten opzichte van die dag) → stap.
   const axisSteps = new WeakMap<CalendarEngine, Map<number, Map<number, { nextMs: number; skipMs: number; dayMinutes: number }>>>();
   const axisStep = (eng: CalendarEngine, prevMs: number, skipMs: number) => {
     let bySkip = axisSteps.get(eng);
     if (!bySkip) { bySkip = new Map(); axisSteps.set(eng, bySkip); }
-    let byPrev = bySkip.get(skipMs);
-    if (!byPrev) { byPrev = new Map(); bySkip.set(skipMs, byPrev); }
-    let step = byPrev.get(prevMs);
+    const skipKey = skipMs / MS_PER_DAY;
+    let byPrev = bySkip.get(skipKey);
+    if (!byPrev) { byPrev = new Map(); bySkip.set(skipKey, byPrev); }
+    const prevKey = prevMs - skipMs;
+    let step = byPrev.get(prevKey);
     if (!step) {
       const skip = new Date(skipMs);
       const dayMinutes = eng.effectiveBandsOn(skip).reduce((acc, b) => acc + b.end - b.start, 0);
@@ -362,7 +366,7 @@ function levelPass(
         skipMs: eng.nextWorkDayAfter(skip).getTime(),
         nextMs: eng.nextWorkInstant(eng.addWorkingMinutesSigned(new Date(prevMs), dayMinutes)).getTime(),
       };
-      byPrev.set(prevMs, step);
+      byPrev.set(prevKey, step);
     }
     return step;
   };
@@ -1159,7 +1163,7 @@ function levelPass(
     // Snelle afwijzing (`rejectsOnProject`): een kandidaat die op een dag de projectcapaciteit
     // overschrijdt valt af zonder dat zijn hele plaatsing wordt opgebouwd. Alleen AFWIJZEN gaat hier;
     // een kandidaat die niet snel afvalt loopt het gewone pad (`demandAt` + `fits`), dat beslist.
-    const rejectsOnProject = fastProjectRejection(task);
+    const rejectsOnProject = LEVELER_TEST_HOOKS.fastScan ? fastProjectRejection(task) : null;
     while (guard++ < HARD_SCAN_CAP) {
       if (rejectsOnProject !== null && rejectsOnProject.test(cand, !calendarFeasibleSeen)) {
         poolBlockedOnly = false; // zoals `fits`: de PROJECTtoets faalde
@@ -1269,6 +1273,7 @@ function levelPass(
     // Per resource de eenheden per toewijzing plus zijn dagtabellen (op dagnummer: capaciteit en werkdag).
     const perResource = [...groups].map(([resId, units]) => ({
       resId, units, capacity: dayTable(capacityByDay, resId), works: dayTable(workDayByDay, resId),
+      bk: undefined as Record<string, number> | undefined,
     }));
     let base: WorkPlacement | null | undefined;
     let shape: Map<number, ShareProfile> | null | undefined;
@@ -1276,18 +1281,20 @@ function levelPass(
     state.test = (cand, needCalendar) => {
       state.calendarOk = true;
       if (!Number.isFinite(cand.getTime())) return false;
+      // Het grootboek van de resource: pas bij de eerste boeking aangemaakt, dus per toets opnieuw lezen.
+      for (let g = 0; g < perResource.length; g++) perResource[g].bk = booked[perResource[g].resId];
       if (base === undefined) base = taskWorkPlacement(task, engine, placementOptions, cand);
       if (base === null) return false;
       if (shape === undefined) shape = shareProfileCache(engine, base);
-      const { dayMs, isos, shares } = shape?.get(cand.getTime())
+      const { days, shares } = shape?.get(cand.getTime())
         ?? placementShareProfile(engine, { ...base, start: cand } as WorkPlacement);
       let conflict = false;
       for (let d = 0; d < shares.length; d++) {
         const share = shares[d];
-        const iso = isos[d];
-        const dayNumber = dayMs[d] / MS_PER_DAY;
+        const dayNumber = days[d];
+        const iso = isoOfDayNumber(dayNumber);
         for (let g = 0; g < perResource.length; g++) {
-          const { resId, units, capacity, works } = perResource[g];
+          const { resId, units, capacity, works, bk } = perResource[g];
           // Zelfde optelvolgorde als `computeDemand`: (u_n + (… + (u_2 + u_1))).
           let amount = share * units[0];
           for (let i = 1; i < units.length; i++) amount = share * units[i] + amount;
@@ -1300,7 +1307,7 @@ function levelPass(
           if (!conflict) {
             let cap = capacity[dayNumber];
             if (cap === undefined) { cap = capacityOf(resId, iso); capacity[dayNumber] = cap; }
-            if (exceedsCapacity(bookedOn(resId, iso) + amount, cap)) conflict = true;
+            if (exceedsCapacity((bk?.[iso] ?? 0) + amount, cap)) conflict = true;
           }
         }
         // Een botsing is genoeg om af te wijzen; verder lopen alleen zolang de kalendertoets nog uitstaat
